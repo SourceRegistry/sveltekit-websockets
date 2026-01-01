@@ -160,11 +160,12 @@ To allow WebSocket upgrades during **development and preview**, the Vite plugin 
 ```ts
 // vite.config.ts
 import {defineConfig} from 'vite';
-import {websockets} from '$lib/vite';
+import {websockets} from '@sourceregistry/sveltekit-websockets/vite';
 
 export default defineConfig({
     plugins: [
-        websockets()
+        sveltekit(),
+        websockets() //ADD THIS
     ],
     server: {
         hmr: {

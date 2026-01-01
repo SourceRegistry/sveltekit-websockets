@@ -1,5 +1,5 @@
 <script lang="ts">
-    import {WebSocket} from "$lib/client/index.js"; //!IMPORTANT use in production "@sourceregistry/sveltekit-websockets" <<-- This uses the client
+    import WebSocket from "$lib/client/index.js"; //!IMPORTANT use in production "@sourceregistry/sveltekit-websockets" <<-- This uses the client
 </script>
 
 <WebSocket action="?/ws">
