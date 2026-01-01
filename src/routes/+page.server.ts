@@ -1,4 +1,5 @@
 export const actions = {
+    //@ts-ignore
     ws: (event) => {
         return {
             url: websockets.use(event, (socket) => {

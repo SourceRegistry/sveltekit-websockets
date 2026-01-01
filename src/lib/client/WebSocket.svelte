@@ -1,6 +1,13 @@
 <script lang="ts" module>
     import {parse} from "devalue";
 
+    /**
+     * Gives the ability to call the action and create the connection url but not use it directly
+     * @param action
+     * @param requestInit
+     * @param devalue
+     * @constructor
+     */
     export const Action = async (action: string, requestInit: RequestInit = {}, devalue: boolean = true): Promise<{
         url: string,
         protocols: string[] | string,
@@ -35,6 +42,13 @@
         }
     }
 
+    /**
+     * Used to create a WebSocket based on a form action
+     * @param action
+     * @param requestInit
+     * @param devalue
+     * @constructor
+     */
     export const ActionSocket = (action: string, requestInit: RequestInit = {}, devalue: boolean = true) => Action(action, requestInit, devalue).then((r) => r.open())
 
     export class ActionSockerError extends Event {

@@ -41,14 +41,23 @@ export class ReferencedWebSocket extends WebSocket {
     lastActivity?: number;
     public metadata: Record<string, any> = {};
 
+    /**
+     * Returns the socket reference id
+     */
     get ref() {
         return this._ref;
     }
 
+    /**
+     * Returns the time (millis) the sockets connected (upgraded)
+     */
     get connectedAt() {
         return this._connectedAt;
     }
 
+    /**
+     * Return the time (millis) the socket is connected
+     */
     get uptime() {
         return Date.now() - this._connectedAt;
     }
