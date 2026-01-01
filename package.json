@@ -50,6 +50,9 @@
     "type": "git",
     "url": "git+https://github.com/SourceRegistry/sveltekit-websockets.git"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "@sveltejs/adapter-node": "^5.2.0",
     "svelte": "^5.0.0"
