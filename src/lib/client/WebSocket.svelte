@@ -36,6 +36,18 @@
     }
 
     export const ActionSocket = (action: string, requestInit: RequestInit = {}, devalue: boolean = true) => Action(action, requestInit, devalue).then((r) => r.open())
+
+    export class ActionSockerError extends Event {
+
+        public readonly reason: unknown
+
+        constructor(reason: unknown) {
+            super("ActionSocketError");
+            this.reason = reason;
+        }
+
+    }
+
 </script>
 
 <script lang="ts" generics="T = any">
@@ -47,7 +59,7 @@
         onmessage?: (ev: MessageEvent<T>) => unknown,
         onopen?: (ev: Event) => unknown,
         onclose?: (ev: CloseEvent) => unknown,
-        onerror?: (reason?: unknown) => unknown,
+        onerror?: (reason?: Event) => unknown,
     }
 
     type Snippets = {
@@ -67,7 +79,7 @@
         Snippets &
         WebSocketEvents
 
-    const {
+    let {
         onmessage,
         data = $bindable<MessageEvent<T>['data'][]>([]),
         children,
@@ -91,14 +103,14 @@
                     url = result.url;
                     protocols = result.protocols
                 } catch (e) {
-                    restProps.onerror?.(e);
+                    restProps.onerror?.(new ActionSockerError('url or action is required'));
                     return;
                 }
             } else if ('url' in restProps && restProps.url) {
                 url = restProps.url instanceof URL ? restProps.url.toString() : restProps.url;
                 protocols = restProps.protocols ? restProps.protocols : [];
             } else {
-                restProps.onerror?.('url or action is required');
+                restProps.onerror?.(new ActionSockerError('url or action is required'));
                 return;
             }
 
@@ -106,7 +118,7 @@
             ws.binaryType = restProps.binaryType ? restProps.binaryType : 'arraybuffer';
             ws.onmessage = (event) => {
                 onmessage?.(event)
-                data.push(event.data);
+                data = [...data, event.data];
             }
             ws.onopen = (event) => {
                 restProps.onopen?.(event)
@@ -116,7 +128,9 @@
                 restProps.onclose?.(event)
                 open = false;
             }
-            ws.onerror = restProps.onerror ? restProps.onerror : null
+            ws.onerror = (event) => {
+                restProps.onerror?.(new ActionSockerError(event));
+            }
         },
         close(code?: number, reason?: string) {
             if (!ws) return

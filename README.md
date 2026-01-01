@@ -1,53 +1,66 @@
-# 🔌 @sourceregistry/sveltekit-websockets
+# @sourceregistry/sveltekit-websockets
 
 [![npm version](https://img.shields.io/npm/v/@sourceregistry/sveltekit-websockets?logo=npm)](https://www.npmjs.com/package/@sourceregistry/sveltekit-websockets)
 [![License](https://img.shields.io/npm/l/@sourceregistry/sveltekit-websockets)](https://github.com/SourceRegistry/sveltekit-websockets/blob/main/LICENSE)
 [![CI](https://github.com/SourceRegistry/sveltekit-websockets/actions/workflows/test.yml/badge.svg)](https://github.com/SourceRegistry/node-env/actions)
 
-Typed WebSocket infrastructure for SvelteKit — per-request or continuous connections, full back-end lifecycle, and a
-reactive Svelte component.
+Typed WebSocket infrastructure for **SvelteKit**, providing both **ephemeral per-request sockets** and **persistent
+WebSocket endpoints**, with a reactive Svelte client component and a Vite plugin for proper upgrade handling.
 
-> **IMPORTANT: Works only with @sveltejs/adapter-node**
-> <br/>
-> **Make sure to load the [Vite plugin](#-vite-plugin) ←←←←←←←**
+> ⚠️ **Node-only**
+>
+> This package **requires `@sveltejs/adapter-node`**.
+> WebSockets are not supported on serverless or edge adapters.
 
 ---
 
 ## ✨ Features
 
-- ✅ Simple `.use(event, handler)` for session-bound WebSockets
-- ♾️ `.continuous(path, handler)` for persistent routes
-- 🧠 Lifecycle events: `connect`, `message`, `disconnect`
-- 🧩 Svelte component: streaming messages, `bind:data`, auto reconnect
-- ⚙️ Vite plugin: supports `.upgrade()` in dev and preview
-- 🔒 Optional timeouts, auth, and cleanup guards
+* 🔌 **Per-request WebSockets** tied to SvelteKit actions
+* 🔁 **Persistent WebSocket routes** via controller-based routing
+* 🧠 Clear lifecycle hooks: `connect`, `message`, `close`, `error`
+* 🧩 Svelte component for reactive streaming with auto-reconnect
+* ⚙️ Vite plugin to enable `.upgrade()` in dev & preview
+* 🔐 Ephemeral connection keys with TTL and cleanup
+* 🧪 Designed for production-grade backends, not demos
 
 ---
 
 ## 📦 Installation
 
-```bash
-npm add @sourceregistry/svelte-websockets
-````
+```sh
+npm install @sourceregistry/sveltekit-websockets
+```
 
----
+or
 
-## 🗂️ Project Structure
-
-```text
-src/
-├── lib/
-│   ├── client/      # WebSocketStream.svelte and helpers
-│   ├── server/      # WebSocketEndpointController and API
-│   └── vite/        # Vite plugin for dev/preview upgrade handling
-└── routes/          # WebSocket endpoints via +page.server.ts (EXAMPLE)
+```sh
+pnpm add @sourceregistry/sveltekit-websockets
+# or
+yarn add @sourceregistry/sveltekit-websockets
 ```
 
 ---
 
-## 🚀 Server Usage
+## 📁 Recommended Project Structure
 
-### 🔹 `use()` — One-time URL for per-request socket
+```
+src/
+├── lib/
+│   ├── client/        # Svelte WebSocket component + helpers
+│   ├── server/        # WebSocket controllers & server logic
+│   └── vite/          # Vite plugin for upgrade handling
+└── routes/
+    └── ...            # SvelteKit routes using WebSockets
+```
+
+---
+
+## 🧠 Server Usage
+
+### 1️⃣ Per-request WebSockets (`use()`)
+
+Creates a **single-use WebSocket URL** bound to a SvelteKit request (e.g. a form action).
 
 ```ts
 // src/routes/example/+page.server.ts
@@ -57,131 +70,153 @@ export const actions = {
     ws: async (event) => {
         return {
             url: websockets.use(event, (socket) => {
-                socket.send("Connected 👋");
+                socket.send("Connected!");
 
-                const interval = setInterval(() => socket.send("Ping!"), 1000);
-                socket.addEventListener("close", () => clearInterval(interval));
+                socket.addEventListener("message", (msg) => {
+                    console.log("Client says:", msg.data);
+                });
             })
-        }
+        };
     }
 };
 ```
 
-Returns:
+Returned response:
 
-```ts
+```json
 {
-    url: "ws://localhost:5173/_/connect/abc123"
+  "url": "ws://localhost:5173/_/connect/abc123"
 }
 ```
 
+Characteristics:
+
+* One-time connection key
+* Automatically expires (TTL)
+* Ideal for request-bound workflows and auth-safe upgrades
+
 ---
 
-### 🔹 `continuous()` — Persistent WebSocket route
+### 2️⃣ Persistent WebSockets (`continuous()`)
+
+Register long-lived WebSocket endpoints independent of requests.
 
 ```ts
 // src/lib/server/index.ts
-import {WebSocketEndpointController} from './controller';
+import {WebSocketEndpointController} from '$lib/server/controller';
 
 export const websockets = new WebSocketEndpointController();
 
 websockets.continuous('/chat', (socket) => {
-    socket.send("Welcome to /chat!");
+    socket.send("Welcome to /chat");
+
+    socket.addEventListener("message", (msg) => {
+        socket.send(`Echo: ${msg.data}`);
+    });
 });
+```
+
+Accessible via:
+
+```
+ws://localhost:5173/chat
 ```
 
 ---
 
-## 🧩 Svelte Client
+## 🧑‍💻 Svelte Client Component
 
-### Import the WebSocketStream component
+The package exports a Svelte component for declarative WebSocket usage.
 
 ```svelte
 <script lang="ts">
-    import {WebSocket} from "@sourceregistry/sveltekit-websockets"; // <<-- This uses the client
+    import { WebSocket } from "@sourceregistry/sveltekit-websockets";
 </script>
 
 <WebSocket action="?/ws">
     {#snippet message(data)}
-        <p>{new Date().toLocaleString()}: {data}</p>
+        <p>{new Date().toLocaleTimeString()}: {data}</p>
     {/snippet}
 </WebSocket>
 ```
 
-Props:
+### Component Props
 
-| Prop         | Type                  | Description                        |
-|--------------|-----------------------|------------------------------------|
-| `action`     | string                | POST route that returns `{ url }`  |
-| `url`        | string                | Optional direct WebSocket URL      |
-| `data`       | `T[]`                 | Reactive list of received messages |
-| `auto_open`  | boolean               | Connect on mount (default: true)   |
-| `message`    | `(msg) =>`            | Render single message              |
-| `controller` | `{ open(), close() }` | Control socket manually            |
+| Prop         | Type      | Description                             |
+|--------------|-----------|-----------------------------------------|
+| `action`     | `string`  | POST action returning `{ url }`         |
+| `url`        | `string`  | Direct WebSocket URL (optional)         |
+| `data`       | `T[]`     | Reactive array of received messages     |
+| `auto_open`  | `boolean` | Auto-connect on mount (default: `true`) |
+| `controller` | object    | Manual `open()` / `close()` control     |
+| `message`    | snippet   | Render callback per message             |
 
 ---
 
-## ⚙️ Vite Plugin
+## ⚙️ Vite Plugin (Required)
 
-To enable `.upgrade()` handling in dev/preview:
+To allow WebSocket upgrades during **development and preview**, the Vite plugin must be registered.
 
 ```ts
 // vite.config.ts
+import {defineConfig} from 'vite';
 import {websockets} from '$lib/vite';
 
 export default defineConfig({
     plugins: [
-        websockets() //ADD this to enable websocket for you sveltekit project
+        websockets()
     ],
-    // ---- DEVELOPMENT ONLY ----
     server: {
         hmr: {
-            port: 5174 //TO NOT CONFLICY WITH VITE HOT MODULE RELOAD
+            port: 5174
         }
-    },
-    // --------
+    }
 });
 ```
 
----
+Without this plugin:
 
-## 🧠 Internals
-
-The `WebSocketEndpointController` manages:
-
-* All connected sockets (`Map<string, WebSocket>`)
-* Metadata for timeouts, sessions, IPs
-* Upgrade routing for `/_/connect/:key`
-* Lifecycle events: `connect`, `disconnect`, `error`
-* Optional: per-socket auth, TTL, and queueing
+* `.upgrade()` requests will fail in dev
+* WebSockets may only work in production builds
 
 ---
 
-## 🔒 Security
+## 🛠️ Internals Overview
 
-* Ephemeral one-time keys for `use()` connections
+The `WebSocketEndpointController` handles:
+
+* WebSocket upgrade routing (`/_/connect/:key`)
+* Ephemeral connection keys
+* Active socket registry (`Map`)
+* TTL-based cleanup
+* Lifecycle hooks
+* Optional guards (auth, IP, session)
+
+This design keeps WebSocket logic **explicit, testable, and framework-aligned**.
+
+---
+
+## 🔐 Security Model
+
+* One-time connection keys for `use()`
 * Configurable TTL (default: 2 minutes)
-* Optional user/session guard middleware
-* Built-in cleanup of disconnected sockets
+* Automatic cleanup of closed sockets
+* No global socket leaks
+* Explicit routing and ownership
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
-Contributions are very welcome!
-Please open issues for bugs or feature requests and pull requests for changes.
-Follow the standard fork → branch → PR workflow.
+Contributions are welcome.
+
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Open a Pull Request
 
 ---
 
-🙌 **Contributing**
-PRs welcome! Please:
+## 📄 License
 
-- Add tests for new features
-- Maintain 100% coverage
-- Follow existing code style
-
-Found a security issue? [Report it responsibly](mailto:a.p.a.slaa@projectsource.nl).
-
-🔗 **GitHub**: [github.com/SourceRegistry/sveltekit-websockets](https://github.com/SourceRegistry/sveltekit-websockets)  
-📦 **npm**: [@sourceregistry/sveltekit-websockets](https://www.npmjs.com/package/@sourceregistry/sveltekit-websockets)
+Apache-2.0
