@@ -1,6 +1,6 @@
 {
   "name": "@sourceregistry/sveltekit-websockets",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Typed WebSocket infrastructure for SvelteKit — per-request or continuous connections, full back-end lifecycle, and a reactive Svelte component.",
   "author": "A.P.A. Slaa (a.p.a.slaa@projectsource.nl)",
   "scripts": {
