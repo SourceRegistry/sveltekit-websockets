@@ -83,7 +83,7 @@
   "bugs": {
     "url": "https://github.com/SourceRegistry/sveltekit-websockets/issues"
   },
-  "homepage": "https://github.com/SourceRegistry/sveltekit-websockets#readme",
+  "homepage": "https://sourceregistry.github.io/sveltekit-websockets/",
   "dependencies": {
     "ws": "^8.18.3"
   },
