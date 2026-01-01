@@ -42,7 +42,7 @@ yarn add @sourceregistry/sveltekit-websockets
 
 ---
 
-## 📁 Recommended Project Structure
+## 📁 Project Structure
 
 ```
 src/
@@ -130,7 +130,7 @@ The package exports a Svelte component for declarative WebSocket usage.
 
 ```svelte
 <script lang="ts">
-    import { WebSocket } from "@sourceregistry/sveltekit-websockets";
+    import WebSocket from "@sourceregistry/sveltekit-websockets";
 </script>
 
 <WebSocket action="?/ws">
