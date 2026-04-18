@@ -25,6 +25,13 @@ export type BufferLike =
     | { valueOf(): string }
     | { [Symbol.toPrimitive](hint: string): string };
 
+export type WebSocketSendOptions = {
+    mask?: boolean | undefined;
+    binary?: boolean | undefined;
+    compress?: boolean | undefined;
+    fin?: boolean | undefined;
+};
+
 type MaybePromise<T> = T | Promise<T>;
 
 declare global {
@@ -60,6 +67,46 @@ export class ReferencedWebSocket extends WebSocket {
      */
     get uptime() {
         return Date.now() - this._connectedAt;
+    }
+
+    send(data: BufferLike, cb?: (err?: Error) => void): void;
+    send(data: BufferLike, options: WebSocketSendOptions, cb?: (err?: Error) => void): void;
+    send(data: BufferLike, optionsOrCallback?: WebSocketSendOptions | ((err?: Error) => void), cb?: (err?: Error) => void): void {
+        if (typeof optionsOrCallback === 'function') {
+            super.send(data, optionsOrCallback);
+            return;
+        }
+
+        if (optionsOrCallback) {
+            super.send(data, optionsOrCallback, cb);
+            return;
+        }
+
+        super.send(data, cb);
+    }
+
+    close(code?: number, data?: string | Buffer): void {
+        super.close(code, data);
+    }
+
+    ping(data?: any, mask?: boolean, cb?: (err: Error) => void): void {
+        super.ping(data, mask, cb);
+    }
+
+    pong(data?: any, mask?: boolean, cb?: (err: Error) => void): void {
+        super.pong(data, mask, cb);
+    }
+
+    terminate(): void {
+        super.terminate();
+    }
+
+    pause(): void {
+        super.pause();
+    }
+
+    resume(): void {
+        super.resume();
     }
 }
 
