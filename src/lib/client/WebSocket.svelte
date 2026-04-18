@@ -1,8 +1,8 @@
 <script lang="ts" module>
-    import {parse} from "devalue";
+    import {deserialize} from "$app/forms";
     import type {Snippet} from "svelte";
 
-    export type ActionResult = {
+    export type ActionSocketResult = {
         url: string,
         protocols: string[] | string,
         open(): WebSocket
@@ -33,7 +33,7 @@
     export type WebSocketProps<T = any> =
         ({ url: string | URL, protocols?: (string | string[]) } | {
             action: string,
-            devalue?: false,
+            devalue?: boolean,
             init?: RequestInit
         }) &
         { auto_open?: boolean, data?: T[], binaryType?: BinaryType } &
@@ -47,17 +47,27 @@
      * @param devalue
      * @constructor
      */
-    export const Action = async (action: string, requestInit: RequestInit = {}, devalue: boolean = true): Promise<ActionResult> => {
+    export const Action = async (action: string, requestInit: RequestInit = {}, devalue: boolean = true): Promise<ActionSocketResult> => {
+        const headers = new Headers(requestInit.headers);
+        if (devalue !== false) {
+            headers.set('accept', 'application/json');
+            headers.set('x-sveltekit-action', 'true');
+        }
+
         const response = await fetch(action, {
             ...requestInit,
-            body: requestInit?.body ? requestInit.body : new FormData(),
+            headers,
+            body: requestInit.body ?? new FormData(),
             method: 'POST',
-        })
+            cache: requestInit.cache ?? 'no-store',
+        });
+
         if (!response.ok) {
             throw new Error(`${response.status} ${response.statusText}`, {cause: response})
         }
-        const json = await response.json();
+
         if (devalue === false) {
+            const json = await response.json();
             return {
                 url: json.url,
                 protocols: json.protocols ?? [],
@@ -66,7 +76,12 @@
                 }
             }
         } else {
-            const data = parse(json.data);
+            const result = deserialize<{ url: string, protocols?: string | string[] }, Record<string, unknown>>(await response.text());
+            if (result.type !== 'success' || !result.data?.url) {
+                throw new Error(`Action failed with result type "${result.type}"`, {cause: result});
+            }
+
+            const data = result.data;
             return {
                 url: data.url,
                 protocols: data.protocols ?? [],
@@ -123,7 +138,7 @@
             let protocols: (string | string[])
             if ('action' in restProps && restProps.action) {
                 try {
-                    const result = await Action(restProps.action, restProps.init, restProps.devalue);
+                    const result = await Action(restProps.action, restProps.init, restProps.devalue ?? true);
                     url = result.url;
                     protocols = result.protocols
                 } catch (e) {
