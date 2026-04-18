@@ -1,3 +1,10 @@
+## [1.0.4](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.3...v1.0.4) (2026-04-18)
+
+
+### Bug Fixes
+
+* deserialize websocket action responses ([a47f8bc](https://github.com/SourceRegistry/sveltekit-websockets/commit/a47f8bcdb76435d07fcbd80b588ed47dc5037498))
+
 ## [1.0.3](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.2...v1.0.3) (2026-04-18)
 
 
