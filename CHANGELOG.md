@@ -1,3 +1,10 @@
+## [1.0.3](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.2...v1.0.3) (2026-04-18)
+
+
+### Bug Fixes
+
+* expose referenced websocket methods ([b1421ac](https://github.com/SourceRegistry/sveltekit-websockets/commit/b1421accf89544e43e2014ee0f854bd8a71f02f6))
+
 ## [1.0.2](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.1...v1.0.2) (2026-04-18)
 
 
