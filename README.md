@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@sourceregistry/sveltekit-websockets?logo=npm)](https://www.npmjs.com/package/@sourceregistry/sveltekit-websockets)
 [![License](https://img.shields.io/npm/l/@sourceregistry/sveltekit-websockets)](https://github.com/SourceRegistry/sveltekit-websockets/blob/main/LICENSE)
-[![CI](https://github.com/SourceRegistry/sveltekit-websockets/actions/workflows/test.yml/badge.svg)](https://github.com/SourceRegistry/node-env/actions)
+[![CI](https://github.com/SourceRegistry/sveltekit-websockets/actions/workflows/ci.yml/badge.svg)](https://github.com/SourceRegistry/node-env/actions)
 
 Typed WebSocket infrastructure for **SvelteKit**, providing both **ephemeral per-request sockets** and **persistent
 WebSocket endpoints**, with a reactive Svelte client component and a Vite plugin for proper upgrade handling.

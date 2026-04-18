@@ -114,6 +114,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
     private sockets = new Map<string, ReferencedWebSocket>();
     private pendingKeys = new Map<string, PendingKey>();
     private rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+    private cleanupTimer?: NodeJS.Timeout;
 
     get authHandler() {
         return this.config.authHandler ?? (() => true);
@@ -127,8 +128,8 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
         super();
         if (this.config.useConnectionKeys === undefined) this.config.useConnectionKeys = true;
 
-        // Clean up expired pending keys periodically
-        setInterval(() => this.cleanupExpiredKeys(), 30000); // Every 30 seconds
+        this.cleanupTimer = setInterval(() => this.cleanupExpiredKeys(), 30000);
+        this.cleanupTimer.unref?.();
     }
 
     private cleanupExpiredKeys(): void {
@@ -403,21 +404,26 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
         return new Promise((resolve) => {
             const sockets = Array.from(this.sockets.values());
             let closedCount = 0;
+            let forceTimeout: NodeJS.Timeout;
 
             if (sockets.length === 0) {
                 resolve();
                 return;
             }
 
+            const finish = () => {
+                clearTimeout(forceTimeout);
+                resolve();
+            };
+
             const closeHandler = () => {
                 closedCount++;
                 if (closedCount === sockets.length) {
-                    resolve();
+                    finish();
                 }
             };
 
-            // Set timeout for forced termination
-            const forceTimeout = setTimeout(() => {
+            forceTimeout = setTimeout(() => {
                 for (const socket of this.sockets.values()) {
                     if (socket.readyState === WebSocket.OPEN) {
                         socket.terminate();
@@ -438,7 +444,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
 
             // Clear timeout if all connections close gracefully
             if (closedCount === sockets.length) {
-                clearTimeout(forceTimeout);
+                finish();
             }
         });
     }
@@ -472,6 +478,11 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
     }
 
     destroy() {
+        if (this.cleanupTimer) {
+            clearInterval(this.cleanupTimer);
+            this.cleanupTimer = undefined;
+        }
+
         // Clear all timers and maps
         for (const socket of this.sockets.values()) {
             if (socket.timeoutTimer) {
@@ -643,4 +654,6 @@ if (!globalThis.websockets) {
     globalThis.websockets = WebSockets;
 }
 
-export default websockets = globalThis.websockets;
+export const websockets = globalThis.websockets;
+
+export default websockets;

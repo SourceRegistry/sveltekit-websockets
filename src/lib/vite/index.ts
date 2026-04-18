@@ -15,8 +15,7 @@ const getPackageJSON = () => {
             return JSON.parse(readFileSync(resolve(import.meta.dirname, '../../../package.json'), 'utf-8'));
         }catch (err){
             console.error('Failed to read package.json:', err);
-            // Default to a reasonable value if we can't read the package
-            return '@app/server';
+            return {name: '@app/server', version: '0.0.0'};
         }
     }
 };
@@ -34,7 +33,7 @@ const template = () =>
 import * as polka from "./_index.js";
 
 import { WebSockets } from '${_package.name}/server';
-polka.server.server.on('upgrade', (req, socket, head) => WebSockets.instance.upgrade(req, socket, head));
+polka.server.server.on('upgrade', (req, socket, head) => WebSockets.upgrade(req, socket, head));
 
 console.log('> SvelteKit WebSockets adapter');
 
@@ -78,8 +77,10 @@ export const websockets = (opts = {packageOutputDir: 'build'}) => {
 
                     if (existsSync(filePath)) {
                         const oldIndexPath = join(outputDir, '_index.js');
-                        console.log(styleText(['yellow', 'italic'], `  - Renaming exising ${opts.packageOutputDir}/index.js -> ${opts.packageOutputDir}/_index.js`));
-                        renameSync(filePath, oldIndexPath);
+                        if (!existsSync(oldIndexPath)) {
+                            console.log(styleText(['yellow', 'italic'], `  - Renaming existing ${opts.packageOutputDir}/index.js -> ${opts.packageOutputDir}/_index.js`));
+                            renameSync(filePath, oldIndexPath);
+                        }
                     }
 
                     // Write the template to app.js file

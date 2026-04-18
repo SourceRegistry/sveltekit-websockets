@@ -1,5 +1,44 @@
 <script lang="ts" module>
     import {parse} from "devalue";
+    import type {Snippet} from "svelte";
+
+    export type ActionResult = {
+        url: string,
+        protocols: string[] | string,
+        open(): WebSocket
+    }
+
+    export type ActionSocketController = {
+        open(): Promise<void>,
+        close(code?: number, reason?: string): void,
+        get websocket(): WebSocket | undefined,
+        get isOpen(): boolean,
+        get state(): number | undefined
+    }
+
+    export type WebSocketEvents<T = any> = {
+        onmessage?: (ev: MessageEvent<T>) => unknown,
+        onopen?: (ev: Event) => unknown,
+        onclose?: (ev: CloseEvent) => unknown,
+        onerror?: (reason?: Event) => unknown,
+    }
+
+    export type WebSocketSnippets<T = any> = {
+        children?: Snippet<[WebSocket]>
+        messages?: Snippet<[MessageEvent<T>['data'][], WebSocket]>
+        message?: Snippet<[MessageEvent<T>['data'], number, WebSocket]>,
+        controller?: Snippet<[ActionSocketController]>
+    }
+
+    export type WebSocketProps<T = any> =
+        ({ url: string | URL, protocols?: (string | string[]) } | {
+            action: string,
+            devalue?: false,
+            init?: RequestInit
+        }) &
+        { auto_open?: boolean, data?: T[], binaryType?: BinaryType } &
+        WebSocketSnippets<T> &
+        WebSocketEvents<T>
 
     /**
      * Gives the ability to call the action and create the connection url but not use it directly
@@ -8,11 +47,7 @@
      * @param devalue
      * @constructor
      */
-    export const Action = async (action: string, requestInit: RequestInit = {}, devalue: boolean = true): Promise<{
-        url: string,
-        protocols: string[] | string,
-        open(): WebSocket
-    }> => {
+    export const Action = async (action: string, requestInit: RequestInit = {}, devalue: boolean = true): Promise<ActionResult> => {
         const response = await fetch(action, {
             ...requestInit,
             body: requestInit?.body ? requestInit.body : new FormData(),
@@ -49,7 +84,7 @@
      * @param devalue
      * @constructor
      */
-    export const ActionSocket = (action: string, requestInit: RequestInit = {}, devalue: boolean = true) => Action(action, requestInit, devalue).then((r) => r.open())
+    export const ActionSocket = (action: string, requestInit: RequestInit = {}, devalue: boolean = true): Promise<WebSocket> => Action(action, requestInit, devalue).then((r) => r.open())
 
     export class ActionSockerError extends Event {
 
@@ -66,32 +101,7 @@
 
 <script lang="ts" generics="T = any">
 
-    import {onDestroy, onMount, type Snippet} from "svelte";
-
-
-    type WebSocketEvents = {
-        onmessage?: (ev: MessageEvent<T>) => unknown,
-        onopen?: (ev: Event) => unknown,
-        onclose?: (ev: CloseEvent) => unknown,
-        onerror?: (reason?: Event) => unknown,
-    }
-
-    type Snippets = {
-        children?: Snippet<[WebSocket]>
-        messages?: Snippet<[MessageEvent<T>['data'][], WebSocket]>
-        message?: Snippet<[MessageEvent<T>['data'], number, WebSocket]>,
-        controller?: Snippet<[typeof ctrl]>
-    }
-
-    type Props =
-        ({ url: string | URL, protocols?: (string | string[]) } | {
-            action: string,
-            devalue?: false,
-            init?: RequestInit
-        }) &
-        { auto_open?: boolean, data?: T[], binaryType?: BinaryType } &
-        Snippets &
-        WebSocketEvents
+    import {onDestroy, onMount} from "svelte";
 
     let {
         onmessage,
@@ -101,12 +111,12 @@
         message,
         auto_open = true,
         ...restProps
-    }: Props = $props();
+    }: WebSocketProps<T> = $props();
 
     let ws = $state<WebSocket>();
     let open = $state<boolean>(false);
 
-    const ctrl = {
+    const ctrl: ActionSocketController = {
         async open() {
             if (ws && ws.readyState === WebSocket.OPEN) return;
             let url: string;
