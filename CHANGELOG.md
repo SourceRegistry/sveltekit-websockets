@@ -1,3 +1,10 @@
+## [1.0.5](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.4...v1.0.5) (2026-04-19)
+
+
+### Bug Fixes
+
+* expose referenced websocket type surface ([885096f](https://github.com/SourceRegistry/sveltekit-websockets/commit/885096f2a9b6d00246c6b9ee648f37cf43ff1ac3))
+
 ## [1.0.4](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.3...v1.0.4) (2026-04-18)
 
 
