@@ -48,6 +48,22 @@ export class ReferencedWebSocket extends WebSocket {
     lastActivity?: number;
     public metadata: Record<string, any> = {};
 
+    declare binaryType: WebSocket['binaryType'];
+    declare readonly bufferedAmount: WebSocket['bufferedAmount'];
+    declare readonly extensions: WebSocket['extensions'];
+    declare readonly isPaused: WebSocket['isPaused'];
+    declare readonly protocol: WebSocket['protocol'];
+    declare readonly readyState: WebSocket['readyState'];
+    declare readonly url: WebSocket['url'];
+    declare readonly CONNECTING: WebSocket['CONNECTING'];
+    declare readonly OPEN: WebSocket['OPEN'];
+    declare readonly CLOSING: WebSocket['CLOSING'];
+    declare readonly CLOSED: WebSocket['CLOSED'];
+    declare onopen: WebSocket['onopen'];
+    declare onerror: WebSocket['onerror'];
+    declare onclose: WebSocket['onclose'];
+    declare onmessage: WebSocket['onmessage'];
+
     /**
      * Returns the socket reference id
      */
@@ -107,6 +123,85 @@ export class ReferencedWebSocket extends WebSocket {
 
     resume(): void {
         super.resume();
+    }
+
+    addEventListener<K extends keyof WebSocket.WebSocketEventMap>(
+        type: K,
+        listener:
+            | ((event: WebSocket.WebSocketEventMap[K]) => void)
+            | { handleEvent(event: WebSocket.WebSocketEventMap[K]): void },
+        options?: WebSocket.EventListenerOptions,
+    ): void {
+        super.addEventListener(type, listener, options);
+    }
+
+    removeEventListener<K extends keyof WebSocket.WebSocketEventMap>(
+        type: K,
+        listener:
+            | ((event: WebSocket.WebSocketEventMap[K]) => void)
+            | { handleEvent(event: WebSocket.WebSocketEventMap[K]): void },
+    ): void {
+        super.removeEventListener(type, listener);
+    }
+
+    on(event: string | symbol, listener: (...args: any[]) => void): this {
+        return super.on(event, listener);
+    }
+
+    once(event: string | symbol, listener: (...args: any[]) => void): this {
+        return super.once(event, listener);
+    }
+
+    off(event: string | symbol, listener: (...args: any[]) => void): this {
+        return super.off(event, listener);
+    }
+
+    addListener(event: string | symbol, listener: (...args: any[]) => void): this {
+        return super.addListener(event, listener);
+    }
+
+    removeListener(event: string | symbol, listener: (...args: any[]) => void): this {
+        return super.removeListener(event, listener);
+    }
+
+    emit(event: string | symbol, ...args: any[]): boolean {
+        return super.emit(event, ...args);
+    }
+
+    removeAllListeners(event?: string | symbol): this {
+        return super.removeAllListeners(event);
+    }
+
+    listeners(event: string | symbol): Array<(...args: any[]) => void> {
+        return super.listeners(event);
+    }
+
+    rawListeners(event: string | symbol): Array<(...args: any[]) => void> {
+        return super.rawListeners(event);
+    }
+
+    listenerCount(event: string | symbol, listener?: (...args: any[]) => void): number {
+        return super.listenerCount(event, listener);
+    }
+
+    prependListener(event: string | symbol, listener: (...args: any[]) => void): this {
+        return super.prependListener(event, listener);
+    }
+
+    prependOnceListener(event: string | symbol, listener: (...args: any[]) => void): this {
+        return super.prependOnceListener(event, listener);
+    }
+
+    eventNames(): Array<string | symbol> {
+        return super.eventNames();
+    }
+
+    setMaxListeners(n: number): this {
+        return super.setMaxListeners(n);
+    }
+
+    getMaxListeners(): number {
+        return super.getMaxListeners();
     }
 }
 
