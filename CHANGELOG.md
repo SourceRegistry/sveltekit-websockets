@@ -1,3 +1,10 @@
+## [1.0.6](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.5...v1.0.6) (2026-04-20)
+
+
+### Bug Fixes
+
+* **package:** remove SvelteKit peer audit path ([17c18d9](https://github.com/SourceRegistry/sveltekit-websockets/commit/17c18d951ba8c65b54693fa274da9c1ab2a9f31e))
+
 ## [1.0.5](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.4...v1.0.5) (2026-04-19)
 
 
