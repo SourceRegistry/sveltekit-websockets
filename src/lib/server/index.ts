@@ -2,7 +2,6 @@ import {WebSocketServer, WebSocket} from 'ws';
 import type {Duplex} from 'node:stream';
 import type {IncomingMessage} from 'node:http';
 import {randomBytes, randomUUID} from "node:crypto";
-import type {RequestEvent} from "@sveltejs/kit";
 import {EventEmitter} from "node:events";
 
 // Enhanced BufferLike type with better type safety
@@ -33,6 +32,7 @@ export type WebSocketSendOptions = {
 };
 
 type MaybePromise<T> = T | Promise<T>;
+type RequestEventLike = { url: URL };
 
 declare global {
     var websockets: typeof WebSockets;
@@ -701,7 +701,7 @@ const allowed_routes = new Map<string, GenericWebSocketEndpointController>();
 const server = new WebSocketServer({noServer: true, WebSocket: ReferencedWebSocket});
 
 export const WebSockets = {
-    continuous(route: string | RequestEvent | URL, config?: Omit<WebSocketEndpointConfig, 'disposer' | "path">) {
+    continuous(route: string | RequestEventLike | URL, config?: Omit<WebSocketEndpointConfig, 'disposer' | "path">) {
         let path: string;
         if (typeof route === 'string') {
             path = route;
@@ -719,7 +719,7 @@ export const WebSockets = {
         return (allowed_routes.get(path) as WebSocketEndpointController)!;
     },
 
-    use(route: string | RequestEvent | URL, connectionHandler: (ws: ReferencedWebSocket, controller: WebSocketEndpointController) => unknown, config?: Omit<WebSocketEndpointConfig, 'disposer' | 'limit' | 'path'>) {
+    use(route: string | RequestEventLike | URL, connectionHandler: (ws: ReferencedWebSocket, controller: WebSocketEndpointController) => unknown, config?: Omit<WebSocketEndpointConfig, 'disposer' | 'limit' | 'path'>) {
         let path: string;
         if (typeof route === 'string') path = route;
         else if (route instanceof URL) path = route.pathname;
@@ -740,7 +740,7 @@ export const WebSockets = {
         return (allowed_routes.get(path) as WebSocketEndpointController)!.new;
     },
 
-    raw(route: string | RequestEvent | URL, handle: UpgradeHandle) {
+    raw(route: string | RequestEventLike | URL, handle: UpgradeHandle) {
         let path: string;
         if (typeof route === 'string') path = route;
         else if (route instanceof URL) path = route.pathname;

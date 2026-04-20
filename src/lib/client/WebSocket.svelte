@@ -1,5 +1,5 @@
 <script lang="ts" module>
-    import {deserialize} from "$app/forms";
+    import {parse} from "devalue";
     import type {Snippet} from "svelte";
 
     export type ActionSocketResult = {
@@ -29,6 +29,12 @@
         message?: Snippet<[MessageEvent<T>['data'], number, WebSocket]>,
         controller?: Snippet<[ActionSocketController]>
     }
+
+    type ActionResult<Success = Record<string, unknown>> =
+        | { type: 'success', data?: Success }
+        | { type: 'failure', data?: Record<string, unknown> }
+        | { type: 'redirect', location: string }
+        | { type: 'error', error: unknown };
 
     export type WebSocketProps<T = any> =
         ({ url: string | URL, protocols?: (string | string[]) } | {
@@ -76,7 +82,7 @@
                 }
             }
         } else {
-            const result = deserialize<{ url: string, protocols?: string | string[] }, Record<string, unknown>>(await response.text());
+            const result = deserializeActionResult<{ url: string, protocols?: string | string[] }>(await response.text());
             if (result.type !== 'success' || !result.data?.url) {
                 throw new Error(`Action failed with result type "${result.type}"`, {cause: result});
             }
@@ -90,6 +96,12 @@
                 }
             }
         }
+    }
+
+    const deserializeActionResult = <Success,>(body: string): ActionResult<Success> => {
+        const result = JSON.parse(body);
+        if (result.data) result.data = parse(result.data);
+        return result;
     }
 
     /**

@@ -54,8 +54,6 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@sveltejs/kit": "^2.0.0",
-    "@sveltejs/adapter-node": "^5.2.0",
     "svelte": "^5.0.0"
   },
   "devDependencies": {
@@ -63,23 +61,23 @@
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/git": "^10.0.1",
     "@semantic-release/npm": "^13.1.5",
-    "@semantic-release/release-notes-generator": "^14.0.3",
-    "@sveltejs/adapter-auto": "^7.0.0",
-    "@sveltejs/kit": "^2.49.1",
+    "@semantic-release/release-notes-generator": "^14.1.0",
+    "@sveltejs/adapter-auto": "^7.0.1",
+    "@sveltejs/kit": "^2.57.1",
     "@sveltejs/package": "^2.5.7",
-    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@types/ws": "^8.18.1",
-    "@vitest/browser-playwright": "^4.0.15",
-    "@vitest/coverage-v8": "^4.0.16",
-    "playwright": "^1.57.0",
-    "publint": "^0.3.15",
-    "svelte": "^5.45.6",
-    "svelte-check": "^4.3.4",
-    "typedoc": "^0.28.14",
-    "typescript": "^5.9.3",
-    "vite": "^7.2.6",
-    "vitest": "^4.0.15",
-    "vitest-browser-svelte": "^2.0.1"
+    "@vitest/browser-playwright": "^4.1.4",
+    "@vitest/coverage-v8": "^4.1.4",
+    "playwright": "^1.59.1",
+    "publint": "^0.3.18",
+    "svelte": "^5.55.4",
+    "svelte-check": "^4.4.6",
+    "typedoc": "^0.28.19",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.9",
+    "vitest": "^4.1.4",
+    "vitest-browser-svelte": "^2.1.1"
   },
   "license": "Apache-2.0",
   "bugs": {
@@ -87,7 +85,8 @@
   },
   "homepage": "https://sourceregistry.github.io/sveltekit-websockets/",
   "dependencies": {
-    "ws": "^8.18.3"
+    "devalue": "^5.7.1",
+    "ws": "^8.20.0"
   },
   "overrides": {
     "cookie": "^0.7.2"
