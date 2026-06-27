@@ -4,7 +4,7 @@ import {resolve, join, dirname} from 'node:path';
 import {styleText} from 'node:util';
 import type {Duplex} from "node:stream";
 
-import {readFileSync, writeFileSync, mkdirSync, existsSync, renameSync} from 'node:fs';
+import {readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, rmSync} from 'node:fs';
 
 // Get the package name from package.json
 const getPackageJSON = () => {
@@ -76,8 +76,10 @@ export const websockets = (opts = {packageOutputDir: 'build'}) => {
                     ensureDirExists(filePath);
 
                     if (existsSync(filePath)) {
-                        const oldIndexPath = join(outputDir, '_index.js');
-                        if (!existsSync(oldIndexPath)) {
+                        const indexContents = readFileSync(filePath, 'utf-8');
+                        if (!indexContents.includes('SvelteKit WebSockets adapter')) {
+                            const oldIndexPath = join(outputDir, '_index.js');
+                            rmSync(oldIndexPath, {force: true});
                             console.log(styleText(['yellow', 'italic'], `  - Renaming existing ${opts.packageOutputDir}/index.js -> ${opts.packageOutputDir}/_index.js`));
                             renameSync(filePath, oldIndexPath);
                         }

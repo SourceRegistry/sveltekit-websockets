@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@sourceregistry/sveltekit-websockets?logo=npm)](https://www.npmjs.com/package/@sourceregistry/sveltekit-websockets)
 [![License](https://img.shields.io/npm/l/@sourceregistry/sveltekit-websockets)](https://github.com/SourceRegistry/sveltekit-websockets/blob/main/LICENSE)
-[![CI](https://github.com/SourceRegistry/sveltekit-websockets/actions/workflows/ci.yml/badge.svg)](https://github.com/SourceRegistry/node-env/actions)
+[![CI](https://github.com/SourceRegistry/sveltekit-websockets/actions/workflows/ci.yml/badge.svg)](https://github.com/SourceRegistry/sveltekit-websockets/actions)
 
 Typed WebSocket infrastructure for **SvelteKit**, providing both **ephemeral per-request sockets** and **persistent
 WebSocket endpoints**, with a reactive Svelte client component and a Vite plugin for proper upgrade handling.
@@ -85,7 +85,7 @@ Returned response:
 
 ```json
 {
-  "url": "ws://localhost:5173/_/connect/abc123"
+  "url": "/example?key=<one-time-key>"
 }
 ```
 
@@ -102,15 +102,17 @@ Characteristics:
 Register long-lived WebSocket endpoints independent of requests.
 
 ```ts
-// src/lib/server/index.ts
-import {WebSocketEndpointController} from '$lib/server/controller';
+// src/hooks.server.ts
+import {websockets} from '@sourceregistry/sveltekit-websockets/server';
 
-export const websockets = new WebSocketEndpointController();
+const chat = websockets.continuous('/chat', {
+    useConnectionKeys: false
+});
 
-websockets.continuous('/chat', (socket) => {
-    socket.send("Welcome to /chat");
+chat.on('connect', (socket) => {
+    socket.send('Welcome to /chat');
 
-    socket.addEventListener("message", (msg) => {
+    socket.addEventListener('message', (msg) => {
         socket.send(`Echo: ${msg.data}`);
     });
 });
@@ -160,6 +162,7 @@ To allow WebSocket upgrades during **development and preview**, the Vite plugin 
 ```ts
 // vite.config.ts
 import {defineConfig} from 'vite';
+import {sveltekit} from '@sveltejs/kit/vite';
 import {websockets} from '@sourceregistry/sveltekit-websockets/vite';
 
 export default defineConfig({
@@ -186,7 +189,7 @@ Without this plugin:
 
 The `WebSocketEndpointController` handles:
 
-* WebSocket upgrade routing (`/_/connect/:key`)
+* WebSocket upgrade routing by registered pathname
 * Ephemeral connection keys
 * Active socket registry (`Map`)
 * TTL-based cleanup

@@ -270,15 +270,20 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
         super();
         if (this.config.useConnectionKeys === undefined) this.config.useConnectionKeys = true;
 
-        this.cleanupTimer = setInterval(() => this.cleanupExpiredKeys(), 30000);
+        this.cleanupTimer = setInterval(() => this.cleanupExpiredState(), 30000);
         this.cleanupTimer.unref?.();
     }
 
-    private cleanupExpiredKeys(): void {
+    private cleanupExpiredState(): void {
         const now = Date.now();
         for (const [id, pendingKey] of this.pendingKeys.entries()) {
             if (now > pendingKey.expiresAt) {
                 this.pendingKeys.delete(id);
+            }
+        }
+        for (const [clientId, limit] of this.rateLimitMap.entries()) {
+            if (now > limit.resetTime) {
+                this.rateLimitMap.delete(clientId);
             }
         }
     }

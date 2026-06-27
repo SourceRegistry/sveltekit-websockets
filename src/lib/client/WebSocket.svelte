@@ -113,7 +113,7 @@
      */
     export const ActionSocket = (action: string, requestInit: RequestInit = {}, devalue: boolean = true): Promise<WebSocket> => Action(action, requestInit, devalue).then((r) => r.open())
 
-    export class ActionSockerError extends Event {
+    export class ActionSocketError extends Event {
 
         public readonly reason: unknown
 
@@ -154,14 +154,14 @@
                     url = result.url;
                     protocols = result.protocols
                 } catch (e) {
-                    restProps.onerror?.(new ActionSockerError('url or action is required'));
+                    restProps.onerror?.(new ActionSocketError(e));
                     return;
                 }
             } else if ('url' in restProps && restProps.url) {
                 url = restProps.url instanceof URL ? restProps.url.toString() : restProps.url;
                 protocols = restProps.protocols ? restProps.protocols : [];
             } else {
-                restProps.onerror?.(new ActionSockerError('url or action is required'));
+                restProps.onerror?.(new ActionSocketError('url or action is required'));
                 return;
             }
 
@@ -180,12 +180,13 @@
                 open = false;
             }
             ws.onerror = (event) => {
-                restProps.onerror?.(new ActionSockerError(event));
+                restProps.onerror?.(new ActionSocketError(event));
             }
         },
         close(code?: number, reason?: string) {
             if (!ws) return
-            if (ws.readyState === WebSocket.OPEN) return ws.close(code, reason)
+            if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) return
+            ws.close(code, reason)
         },
         get websocket() {
             return ws;
