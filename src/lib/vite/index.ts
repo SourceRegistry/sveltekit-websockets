@@ -55,10 +55,10 @@ const ensureDirExists = (filePath: string) => {
 export const websockets = (opts = {packageOutputDir: 'build'}) => {
     return {
         name: 'sveltekit-websocket-server',
-        configurePreviewServer(server) {
+        configurePreviewServer: (server: {httpServer?: {on(event: 'upgrade', listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void): void} | null}) => {
             server.httpServer?.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => WebSockets.upgrade(req, socket, head));
         },
-        configureServer(server) {
+        configureServer: (server: {httpServer?: {on(event: 'upgrade', listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void): void} | null}) => {
             server.httpServer?.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => WebSockets.upgrade(req, socket, head));
         },
         closeBundle: {
@@ -92,5 +92,5 @@ export const websockets = (opts = {packageOutputDir: 'build'}) => {
                 }
             }
         }
-    } as import('vite').Plugin
+    } satisfies import('vite').Plugin;
 };
