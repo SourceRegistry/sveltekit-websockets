@@ -1,3 +1,10 @@
+## [1.0.7](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.6...v1.0.7) (2026-06-27)
+
+
+### Bug Fixes
+
+* **package:** updated dependencies ([24453fd](https://github.com/SourceRegistry/sveltekit-websockets/commit/24453fd5cc8fb54d6f0c712423d8685220e3b7a9))
+
 ## [1.0.6](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.5...v1.0.6) (2026-04-20)
 
 
