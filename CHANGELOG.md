@@ -1,3 +1,10 @@
+## [1.0.8](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.7...v1.0.8) (2026-06-27)
+
+
+### Bug Fixes
+
+* update vite compatibility and audit issues ([7ebc022](https://github.com/SourceRegistry/sveltekit-websockets/commit/7ebc022783537f2b8bfc8a99b0b504f5102916ec))
+
 ## [1.0.7](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.6...v1.0.7) (2026-06-27)
 
 
