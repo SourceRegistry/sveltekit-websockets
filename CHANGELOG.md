@@ -1,3 +1,11 @@
+## [1.0.9](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.8...v1.0.9) (2026-09-20)
+
+
+### Bug Fixes
+
+* prevent raw-endpoint route leak and config mutation ([df624b3](https://github.com/SourceRegistry/sveltekit-websockets/commit/df624b36bf88c722c0bdeceb7089e833f907f80a))
+* use server.ws.port instead of deprecated server.hmr.port ([65cb1b4](https://github.com/SourceRegistry/sveltekit-websockets/commit/65cb1b4704cf96940709229bab451e64fe2762ef))
+
 ## [1.0.8](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.7...v1.0.8) (2026-06-27)
 
 
