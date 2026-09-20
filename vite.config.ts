@@ -6,7 +6,7 @@ import {websockets} from "./src/lib/vite/index.js"; //!IMPORTANT Use @sourceregi
 export default defineConfig({
     plugins: [sveltekit(), websockets()],
     server: {
-        hmr: {
+        ws: {
             port: 5174
         }
     },

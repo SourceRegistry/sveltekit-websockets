@@ -251,8 +251,9 @@ Vite's own HMR client opens a WebSocket on the dev server's port by default, and
 registered route — so it gets closed the same way, the browser's HMR client keeps reconnecting, and the
 page reloads in a loop.
 
-Fix: give HMR its own port with `server.hmr.port` in `vite.config.ts` (see the [README](./README.md#1-register-the-vite-plugin-required)).
+Fix: give HMR's WebSocket its own port with `server.ws.port` in `vite.config.ts` (see the [README](./README.md#1-register-the-vite-plugin-required)).
 That moves Vite's HMR socket off the port this plugin manages, so it's never seen by `WebSockets.upgrade`.
+(Vite 8 moved this option from `server.hmr.port` to `server.ws.port`; `hmr.port` is now deprecated.)
 
 ---
 
