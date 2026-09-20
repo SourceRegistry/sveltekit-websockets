@@ -257,6 +257,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
     private pendingKeys = new Map<string, PendingKey>();
     private rateLimitMap = new Map<string, { count: number; resetTime: number }>();
     private cleanupTimer?: NodeJS.Timeout;
+    private readonly _config: WebSocketEndpointConfig;
 
     get authHandler() {
         return this.config.authHandler ?? (() => true);
@@ -266,9 +267,9 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
         return this._config;
     }
 
-    constructor(public readonly path: string, private readonly _config: WebSocketEndpointConfig) {
+    constructor(public readonly path: string, _config: WebSocketEndpointConfig) {
         super();
-        if (this.config.useConnectionKeys === undefined) this.config.useConnectionKeys = true;
+        this._config = {useConnectionKeys: true, ..._config};
 
         this.cleanupTimer = setInterval(() => this.cleanupExpiredState(), 30000);
         this.cleanupTimer.unref?.();
@@ -751,7 +752,10 @@ export const WebSockets = {
         else if (route instanceof URL) path = route.pathname;
         else path = route.url.pathname
         if (!allowed_routes.has(path)) {
-            const controller = new WebSocketRawEndpointController(path, {handle});
+            const controller = new WebSocketRawEndpointController(path, {
+                handle,
+                disposer: () => allowed_routes.delete(path),
+            });
             allowed_routes.set(path, controller)
         }
     },
