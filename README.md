@@ -47,11 +47,22 @@ export default defineConfig({
         sveltekit(),
         websockets(), // ADD THIS
     ],
+    server: {
+        hmr: {
+            port: 5174, // REQUIRED — see note below
+        },
+    },
 });
 ```
 
-Without it, `.upgrade()` requests fail in dev and preview (production builds on `adapter-node` are patched
-automatically at build time).
+Without the plugin, `.upgrade()` requests fail in dev and preview (production builds on `adapter-node` are
+patched automatically at build time).
+
+> ⚠️ **Also set `server.hmr.port` to a different port, as shown above.** The plugin intercepts every
+> `'upgrade'` request on the dev server's HTTP port and closes any that don't match a registered route.
+> Vite's own HMR client connects over a WebSocket on that same port by default, so without a dedicated
+> `hmr.port` it gets killed too — the browser loses its HMR connection, keeps retrying, and the page
+> reloads in a loop.
 
 ### 2. Per-request WebSockets (`use()`)
 

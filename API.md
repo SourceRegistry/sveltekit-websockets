@@ -241,6 +241,19 @@ type ActionSocketController = {
 This currently assumes `@sveltejs/adapter-node`'s build output exports a `server` (a `polka` instance whose
 `.server` is the underlying `http.Server`). Other Node adapters are not supported.
 
+### HMR port collision
+
+`configureServer`/`configurePreviewServer` attach the upgrade hook to the **same** `httpServer` that Vite's
+dev/preview server uses. Every `'upgrade'` request on that port reaches `WebSockets.upgrade`, which closes
+the socket immediately for any path that isn't a registered route (see `upgrade()` above).
+
+Vite's own HMR client opens a WebSocket on the dev server's port by default, and that connection is not a
+registered route — so it gets closed the same way, the browser's HMR client keeps reconnecting, and the
+page reloads in a loop.
+
+Fix: give HMR its own port with `server.hmr.port` in `vite.config.ts` (see the [README](./README.md#1-register-the-vite-plugin-required)).
+That moves Vite's HMR socket off the port this plugin manages, so it's never seen by `WebSockets.upgrade`.
+
 ---
 
 ## Security model
