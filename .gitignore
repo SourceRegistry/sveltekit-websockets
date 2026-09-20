@@ -31,3 +31,4 @@ docs
 .idea
 .vscode
 .npmrc
+.mcp.json
