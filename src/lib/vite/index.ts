@@ -30,14 +30,22 @@ const template = () =>
  * @generated
  */
 
-import * as polka from "./_index.js";
+import * as adapter from "./_index.js";
 
 import { WebSockets } from '${_package.name}/server';
-polka.server.server.on('upgrade', (req, socket, head) => WebSockets.upgrade(req, socket, head));
+
+// @sveltejs/adapter-node >= 6 exports the node:http Server as \`server\`;
+// earlier versions export the polka app, which holds the http Server as \`server.server\`.
+const httpServer = typeof adapter.server?.on === 'function' ? adapter.server : adapter.server?.server;
+if (typeof httpServer?.on !== 'function') {
+    throw new Error('${_package.name}: no HTTP server exported by the adapter entry (./_index.js)');
+}
+httpServer.on('upgrade', (req, socket, head) => WebSockets.upgrade(req, socket, head));
 
 console.log('> SvelteKit WebSockets adapter');
 
-export default polka;
+export * from "./_index.js";
+export default adapter;
 `;
 
 // Ensure the parent directory exists before writing a file
@@ -53,6 +61,37 @@ const ensureDirExists = (filePath: string) => {
 };
 
 export const websockets = (opts = {packageOutputDir: 'build'}) => {
+    // Wraps the adapter-node entry (renamed to _index.js) with one that attaches the upgrade handler.
+    const writeEntry = () => {
+        try {
+            // Use the absolute path and ensure no leading slash in join
+            const outputDir = resolve(process.cwd(), opts.packageOutputDir);
+            const filePath = join(outputDir, 'index.js');
+
+            console.log(styleText(['cyan', 'bold'], `> Using ${_package.name}`));
+
+            // Ensure the filepath directory exists
+            ensureDirExists(filePath);
+
+            if (existsSync(filePath)) {
+                const indexContents = readFileSync(filePath, 'utf-8');
+                if (!indexContents.includes('SvelteKit WebSockets adapter')) {
+                    const oldIndexPath = join(outputDir, '_index.js');
+                    rmSync(oldIndexPath, {force: true});
+                    console.log(styleText(['yellow', 'italic'], `  - Renaming existing ${opts.packageOutputDir}/index.js -> ${opts.packageOutputDir}/_index.js`));
+                    renameSync(filePath, oldIndexPath);
+                }
+            }
+
+            // Write the template to app.js file
+            writeFileSync(filePath, template(), {encoding: 'utf8'});
+            console.log(styleText('green', '  ✔ done'));
+        } catch (err) {
+            console.log(styleText(['redBright'], 'Failed to write websocket adapter file:'), err);
+            throw err; // Re-throw to make the error visible in the build process
+        }
+    };
+
     return {
         name: 'sveltekit-websocket-server',
         configurePreviewServer: (server: {httpServer?: {on(event: 'upgrade', listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void): void} | null}) => {
@@ -61,38 +100,18 @@ export const websockets = (opts = {packageOutputDir: 'build'}) => {
         configureServer: (server: {httpServer?: {on(event: 'upgrade', listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void): void} | null}) => {
             server.httpServer?.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => WebSockets.upgrade(req, socket, head));
         },
+        // SvelteKit 2 runs the adapter while closing the bundle.
         closeBundle: {
             sequential: true,
             order: 'post', // Ensures this runs last in the writeBundle sequence
-            handler: () => {
-                try {
-                    // Use the absolute path and ensure no leading slash in join
-                    const outputDir = resolve(process.cwd(), opts.packageOutputDir);
-                    const filePath = join(outputDir, 'index.js');
-
-                    console.log(styleText(['cyan', 'bold'], `> Using ${_package.name}`));
-
-                    // Ensure the filepath directory exists
-                    ensureDirExists(filePath);
-
-                    if (existsSync(filePath)) {
-                        const indexContents = readFileSync(filePath, 'utf-8');
-                        if (!indexContents.includes('SvelteKit WebSockets adapter')) {
-                            const oldIndexPath = join(outputDir, '_index.js');
-                            rmSync(oldIndexPath, {force: true});
-                            console.log(styleText(['yellow', 'italic'], `  - Renaming existing ${opts.packageOutputDir}/index.js -> ${opts.packageOutputDir}/_index.js`));
-                            renameSync(filePath, oldIndexPath);
-                        }
-                    }
-
-                    // Write the template to app.js file
-                    writeFileSync(filePath, template(), {encoding: 'utf8'});
-                    console.log(styleText('green', '  ✔ done'));
-                } catch (err) {
-                    console.log(styleText(['redBright'], 'Failed to write websocket adapter file:'), err);
-                    throw err; // Re-throw to make the error visible in the build process
-                }
-            }
+            handler: writeEntry
+        },
+        // SvelteKit 3 runs the adapter (which empties the output directory) in its own
+        // `buildApp` hook with order 'post'. Post hooks run in plugin order, so this one
+        // runs after it as long as websockets() comes after sveltekit() in `plugins`.
+        buildApp: {
+            order: 'post',
+            handler: async () => writeEntry()
         }
     } satisfies import('vite').Plugin;
 };

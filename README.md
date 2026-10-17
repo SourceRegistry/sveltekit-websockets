@@ -45,7 +45,7 @@ import {websockets} from '@sourceregistry/sveltekit-websockets/vite';
 export default defineConfig({
     plugins: [
         sveltekit(),
-        websockets(), // ADD THIS
+        websockets(), // ADD THIS — after sveltekit()
     ],
     server: {
         ws: {
@@ -56,7 +56,8 @@ export default defineConfig({
 ```
 
 Without the plugin, `.upgrade()` requests fail in dev and preview (production builds on `adapter-node` are
-patched automatically at build time).
+patched automatically at build time; SvelteKit 2 and 3, `adapter-node` 5 and 6). Keep `websockets()` after
+`sveltekit()`: on SvelteKit 3 the build entry is written after the adapter has run, in plugin order.
 
 > ⚠️ **Also set `server.ws.port` to a different port, as shown above.** The plugin intercepts every
 > `'upgrade'` request on the dev server's HTTP port and closes any that don't match a registered route.
