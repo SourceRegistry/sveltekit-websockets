@@ -1,10 +1,12 @@
 import {defineConfig} from 'vitest/config';
 import {playwright} from '@vitest/browser-playwright';
 import {sveltekit} from '@sveltejs/kit/vite';
+import adapter from '@sveltejs/adapter-node';
+import {vitePreprocess} from '@sveltejs/vite-plugin-svelte';
 import {websockets} from "./src/lib/vite/index.js"; //!IMPORTANT Use @sourceregistry/sveltekit-websockets
 
 export default defineConfig({
-    plugins: [sveltekit(), websockets()],
+    plugins: [sveltekit({adapter: adapter(), preprocess: vitePreprocess()}), websockets()],
     server: {
         ws: {
             port: 5174

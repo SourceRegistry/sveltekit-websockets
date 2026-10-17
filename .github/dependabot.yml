@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # These pin each other as exact peers; updated one at a time they fail to install.
+      vitest:
+        patterns:
+          - vitest
+          - '@vitest/*'
+          - vitest-browser-svelte
+      sveltekit:
+        patterns:
+          - '@sveltejs/*'
+          - svelte
+          - svelte-check
+      semantic-release:
+        patterns:
+          - '@semantic-release/*'
+    ignore:
+      # svelte-check supports TypeScript up to 6.
+      - dependency-name: typescript
+        versions: ['>=7.0.0']
+      # Must parse what SvelteKit serializes; follow the major SvelteKit itself depends on.
+      - dependency-name: devalue
+        versions: ['>=6.0.0']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
