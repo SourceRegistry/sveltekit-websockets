@@ -1,3 +1,10 @@
+## [1.0.10](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.9...v1.0.10) (2026-10-17)
+
+
+### Bug Fixes
+
+* **vite:** support adapter-node 6 and SvelteKit 3 production builds ([3cc05ff](https://github.com/SourceRegistry/sveltekit-websockets/commit/3cc05ff4df3ff227bf1d7adf8cbbe7c28a73db4f))
+
 ## [1.0.9](https://github.com/SourceRegistry/sveltekit-websockets/compare/v1.0.8...v1.0.9) (2026-09-20)
 
 
