@@ -63,7 +63,9 @@ export const actions = {
 };
 ```
 
-- `connectionHandler(socket, controller)` fires once, on the first (and only) connection. A synchronous throw
+- `connectionHandler(socket, controller)` fires once, on the first (and only) connection. Clean up anything
+  it starts (intervals, subscriptions) when the socket closes, e.g.
+  `socket.addEventListener('close', () => clearInterval(timer))`; nothing stops them for you. A synchronous throw
   closes the socket with `1011`; a rejected promise is reported as an `error` event on the controller (or
   logged if nobody listens).
 - `config` — same as `continuous`, minus `disposer`/`limit`/`path` (`limit` is forced to `1`).
@@ -87,7 +89,8 @@ websockets.raw('/legacy', async (req, socket, head) => {
 The HTTP `'upgrade'` event handler. Wired up for you by the [Vite plugin](#vite-plugin-internals) in dev
 and by the production adapter patch; call it yourself only if you're integrating with a custom server.
 
-An upgrade for a path with no registered route gets its socket ended.
+An upgrade for a path with no registered route gets HTTP `404`. (The dev/preview plugin only passes
+registered routes here; see [Vite plugin internals](#vite-plugin-internals) for the rest.)
 
 ### `handles(req)`
 
@@ -402,7 +405,14 @@ Received messages in `data` are kept across reconnects.
 
 ## Vite plugin internals
 
-`websockets({packageOutputDir: 'build'})` does two things:
+`websockets(options?)` takes:
+
+| Option                    | Default   | Description                                                                 |
+|---------------------------|-----------|------------------------------------------------------------------------------|
+| `packageOutputDir`        | `'build'` | adapter-node's output directory, whose `index.js` is wrapped at build time.  |
+| `unhandledUpgradeTimeout` | `5000`    | Dev/preview: ms an upgrade for an unregistered path may wait for another listener before it gets `404`. `false` turns it off. |
+
+It does two things:
 
 1. **Dev & preview** — hooks the underlying HTTP server's `'upgrade'` event to
    `websockets.upgrade` for registered routes only, so `.upgrade()` requests work under `vite dev` /
@@ -421,8 +431,13 @@ This currently assumes `@sveltejs/adapter-node`'s build output exports a `server
 
 `configureServer`/`configurePreviewServer` attach the upgrade hook to the **same** `httpServer` that Vite's
 dev/preview server uses. The hook only passes requests for registered routes to `WebSockets.upgrade` (see
-[`handles(req)`](#handlesreq)); anything else, such as Vite's HMR socket or Vitest's browser runner, is left
-to its own listener. A separate `server.ws.port` is therefore not needed.
+[`handles(req)`](#handlesreq)); anything else, such as Vite's HMR socket, a `server.proxy` WebSocket or
+Vitest's browser runner, is left to its own listener. A separate `server.ws.port` is therefore not needed.
+
+Vite ignores upgrades it doesn't own without answering them, so a request for a path nobody serves (a typo,
+an endpoint not registered yet) would hang. If no listener has written anything back after
+`unhandledUpgradeTimeout` ms, the plugin answers `404`. Raise it if a proxied WebSocket target takes longer
+than that to accept, or set `false` to leave such requests alone.
 
 ---
 
