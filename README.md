@@ -100,6 +100,10 @@ chat.on('connect', (socket) => {
 
 Now reachable at `ws://localhost:5173/chat`.
 
+Browsers can only connect from the same origin by default, which blocks other sites from opening sockets
+with your visitors' cookies. To allow other origins, set `allowedOrigins` (e.g.
+`{allowedOrigins: ['https://app.example.com']}`); see [Origin check](./API.md#origin-check).
+
 ### 4. Svelte client component
 
 ```svelte
@@ -120,6 +124,7 @@ Now reachable at `ws://localhost:5173/chat`.
 | `url`        | `string`  | Direct WebSocket URL, as an alternative to `action` |
 | `data`       | `T[]`     | Bindable, reactive array of received messages   |
 | `auto_open`  | `boolean` | Auto-connect on mount (default: `true`)         |
+| `reconnect`  | `boolean \| ReconnectOptions` | Reconnect with exponential backoff after a drop (default: `false`) |
 | `controller` | snippet   | Render callback for manual `open()` / `close()` |
 | `message`    | snippet   | Render callback per received message            |
 

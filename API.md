@@ -129,12 +129,37 @@ Same as `shutdown()` with the default timeout. Returns its promise.
 | Option                  | Type                                             | Default   | Description                                                                 |
 |--------------------------|--------------------------------------------------|-----------|-------------------------------------------------------------------------------|
 | `authHandler`            | `(req) => boolean \| Promise<boolean>`           | allow all | Called before a connection is accepted; returning `false` closes it (`1008`). |
+| `allowedOrigins`         | `'same-origin' \| '*' \| string[] \| (origin, req) => boolean \| Promise<boolean>` | `'same-origin'` | Browser origins allowed to connect; others get HTTP `403` before the handshake. See [Origin check](#origin-check). |
 | `limit`                  | `number`                                         | unlimited | Max simultaneous connections; excess connections are closed (`1013`).        |
 | `useConnectionKeys`      | `boolean`                                        | `true`    | Require a one-time `?key=` query param minted by `.new`.                     |
 | `pendingKeyExpiration`   | `number` (ms)                                    | `120_000` | TTL for an unused connection key.                                            |
 | `requiredParams`         | `string[]`                                       | `[]`      | Query params that must be present or the connection is closed (`1008`).      |
 | `timeout`                | `number` (ms)                                    | disabled  | Idle timeout; reset on `message`/`ping`/`pong`. Closes with `1001` on expiry. |
 | `rateLimit`              | `{max: number, window: number}`                  | disabled  | Max connection attempts per client (IP + User-Agent) per rolling window.      |
+
+### Origin check
+
+Browsers attach cookies to WebSocket handshakes from any site, so without an origin check a malicious page
+could open a socket as the logged-in visitor (cross-site WebSocket hijacking). `allowedOrigins` decides
+which `Origin` headers are accepted:
+
+- `'same-origin'` (default): the `Origin` host must match the request's `Host` or `X-Forwarded-Host`, or the
+  `Origin` must equal the `ORIGIN` environment variable (the one adapter-node uses). The scheme isn't
+  compared, so a TLS-terminating proxy works as is.
+- `'*'`: any origin.
+- `string[]`: exact origins, e.g. `['https://app.example.com']` (normalized: case and default ports don't
+  matter).
+- `(origin, req) => boolean | Promise<boolean>`: your own rule. A throw counts as a rejection.
+
+Requests without an `Origin` header are always allowed: browsers send one on every WebSocket handshake, so
+only non-browser clients omit it, and those don't carry a visitor's cookies. `Origin: null` (sandboxed
+iframes, `file://`) only passes with `'*'` or a function.
+
+The check runs before `beforeUpgrade`. `raw()` endpoints aren't checked.
+
+```ts
+websockets.continuous('/chat', {allowedOrigins: ['https://app.example.com', 'https://admin.example.com']});
+```
 
 ---
 
@@ -251,18 +276,46 @@ Full snippet surface, in addition to the props documented in the [README](./READ
 | `controller` | `(ctrl: ActionSocketController)`                       | Always — gives manual control regardless of `auto_open`. |
 
 Events: `onopen`, `onclose`, `onmessage` mirror the native `WebSocket` events; `onerror` instead receives an
-`ActionSocketError`.
+`ActionSocketError`. `onreconnect(attempt, delay)` fires when a reconnect is scheduled.
 
 `ActionSocketController` (passed to the `controller` snippet):
 
 ```ts
 type ActionSocketController = {
-    open(): Promise<void>;
-    close(code?: number, reason?: string): void;
+    open(): Promise<void>;                        // also cancels a scheduled reconnect
+    close(code?: number, reason?: string): void;  // also cancels pending connects and reconnects
     readonly websocket: WebSocket | undefined;
     readonly isOpen: boolean;
     readonly state: number | undefined; // WebSocket.readyState
+    readonly reconnecting: boolean;     // a reconnect is scheduled
 };
+```
+
+### Reconnect
+
+Off by default. `reconnect` takes `true` (defaults) or options:
+
+| Option            | Default     | Description                                                       |
+|-------------------|-------------|--------------------------------------------------------------------|
+| `retries`         | unlimited   | Maximum consecutive attempts; the count resets once a connection opens. |
+| `delay`           | `1000`      | Base delay in ms.                                                  |
+| `factor`          | `2`         | Backoff multiplier.                                                |
+| `maxDelay`        | `30000`     | Upper bound for the delay in ms.                                   |
+| `shouldReconnect` | see below   | `(ev: CloseEvent) => boolean`, decides per close.                  |
+
+The wait before attempt `n` is `min(delay * factor^(n-1), maxDelay)`, randomized to between half and all of
+that so many clients don't reconnect at the same moment after a server restart.
+
+Reconnects happen after the connection drops and after a failed action request. By default a close with
+code `1000`/`1005` (the server closed normally) or `1008` (policy violation: failed auth, invalid key,
+missing parameter) doesn't reconnect, since retrying wouldn't help; `defaultShouldReconnect` is exported if
+you want to extend that rule. `close()` and unmounting never reconnect.
+
+Action-based sockets re-run the action on every attempt, so each gets a fresh single-use connection key.
+Received messages in `data` are kept across reconnects.
+
+```svelte
+<WebSocket action="?/ws" reconnect={{retries: 10, maxDelay: 10_000}} onreconnect={(n, ms) => console.log(`retry ${n} in ${ms}ms`)}/>
 ```
 
 ---
@@ -295,6 +348,8 @@ to its own listener. A separate `server.ws.port` is therefore not needed.
 
 ## Security model
 
+- Browser `Origin` headers are checked against `allowedOrigins` (default same-origin) before the
+  handshake, which blocks cross-site WebSocket hijacking. See [Origin check](#origin-check).
 - Connection keys (`use()`, and `continuous()` unless disabled) are single-use, random (256-bit,
   URL-safe), and expire after `pendingKeyExpiration` (default 2 minutes).
 - Expired keys and stale rate-limit entries are swept every 30 seconds.
