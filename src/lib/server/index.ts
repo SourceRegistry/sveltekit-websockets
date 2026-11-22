@@ -5,6 +5,9 @@ import {STATUS_CODES} from 'node:http';
 import {randomBytes, randomUUID} from "node:crypto";
 import {EventEmitter} from "node:events";
 import {isIPv6} from "node:net";
+import {resolveCodec, type Codec, type CodecOption} from "../codec.js";
+
+export {jsonCodec, devalueCodec, type Codec, type CodecOption} from "../codec.js";
 
 // Enhanced BufferLike type with better type safety
 export type BufferLike =
@@ -108,9 +111,16 @@ export const DEFAULT_MAX_PAYLOAD = 1024 * 1024;
 export const DEFAULT_HEARTBEAT = 30_000;
 
 // Enhanced socket with better metadata tracking
-export class ReferencedWebSocket extends WebSocket {
+/**
+ * @typeParam In - messages this socket receives (decoded by {@link ReferencedWebSocket.onMessage})
+ * @typeParam Out - messages this socket sends with {@link ReferencedWebSocket.sendMessage}
+ */
+export class ReferencedWebSocket<In = unknown, Out = unknown> extends WebSocket {
     private _ref: string = randomUUID();
     private _connectedAt: number = Date.now();
+
+    /** Encodes {@link sendMessage} and decodes {@link onMessage}. Set from the endpoint's `codec` config. */
+    codec: Codec = resolveCodec(undefined);
 
     params?: Record<string, string>;
     timeoutTimer?: NodeJS.Timeout;
@@ -184,6 +194,47 @@ export class ReferencedWebSocket extends WebSocket {
 
     terminate(): void {
         super.terminate();
+    }
+
+    /** Encodes `message` with the endpoint's codec (JSON by default) and sends it as a text frame. */
+    sendMessage(message: Out, cb?: (err?: Error) => void): void {
+        let data: string;
+        try {
+            data = this.codec.encode(message);
+        } catch (error) {
+            if (!cb) throw error;
+            cb(error as Error);
+            return;
+        }
+        super.send(data, cb);
+    }
+
+    /**
+     * Calls `listener` with every message from the client, decoded with the endpoint's codec (JSON by
+     * default). A message that can't be decoded (or a binary frame) is skipped and passed to `onError`, or
+     * emitted as the socket's `'error'` event (reported by the endpoint) when `onError` is omitted.
+     * Decoded messages come from the client: validate them before trusting their shape.
+     * @returns a function that removes the listener
+     */
+    onMessage(listener: (message: In) => unknown, onError?: (error: Error) => unknown): () => void {
+        const handler = (data: WebSocket.RawData, isBinary: boolean) => {
+            let message: In;
+            try {
+                if (isBinary) throw new TypeError('Received a binary frame on a typed socket');
+                message = this.codec.decode(data.toString()) as In;
+            } catch (error) {
+                const err = error instanceof Error ? error : new Error(String(error));
+                if (onError) onError(err);
+                else if (this.listenerCount('error') > 0) this.emit('error', err);
+                else console.error('[sveltekit-websockets] could not decode message:', err);
+                return;
+            }
+            listener(message);
+        };
+        this.on('message', handler);
+        return () => {
+            this.off('message', handler);
+        };
     }
 
     pause(): void {
@@ -336,18 +387,22 @@ export interface GenericWebSocketEndpointController {
 }
 
 // Enhanced event types
-export interface WebSocketEndpointEvents {
-    connect: [ReferencedWebSocket];
-    disconnect: [ReferencedWebSocket, number, string]; // socket, code, reason
+export interface WebSocketEndpointEvents<In = unknown, Out = unknown> {
+    connect: [ReferencedWebSocket<In, Out>];
+    disconnect: [ReferencedWebSocket<In, Out>, number, string]; // socket, code, reason
     destroy: [];
-    error: [Error, ReferencedWebSocket?];
+    error: [Error, ReferencedWebSocket<In, Out>?];
     rateLimit: [IncomingMessage];
 }
 
-export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointEvents> implements GenericWebSocketEndpointController {
+/**
+ * @typeParam In - messages clients send to this endpoint
+ * @typeParam Out - messages this endpoint sends to clients
+ */
+export class WebSocketEndpointController<In = unknown, Out = unknown> extends EventEmitter<WebSocketEndpointEvents<In, Out>> implements GenericWebSocketEndpointController {
     beforeUpgrade?: UpgradeHandler;
 
-    private sockets = new Map<string, ReferencedWebSocket>();
+    private sockets = new Map<string, ReferencedWebSocket<In, Out>>();
     private pendingKeys = new Map<string, PendingKey>();
     private rateLimitMap = new Map<string, { count: number; resetTime: number }>();
     // Requests that passed authorize() before their handshake, so add() doesn't check (and count) them again.
@@ -367,9 +422,13 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
         return this._config;
     }
 
+    /** The codec used by `sendMessage`, `onMessage` and `broadcastMessage`. */
+    readonly codec: Codec;
+
     constructor(public readonly path: string, _config: WebSocketEndpointConfig) {
         super();
         this._config = {useConnectionKeys: true, ..._config};
+        this.codec = resolveCodec(this._config.codec);
 
         this.cleanupTimer = setInterval(() => this.cleanupExpiredState(), 30000);
         this.cleanupTimer.unref?.();
@@ -394,7 +453,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
      * would turn any client-side socket error into an uncaught exception and crash the server.
      * @internal
      */
-    reportError(error: unknown, ws?: ReferencedWebSocket): void {
+    reportError(error: unknown, ws?: ReferencedWebSocket<In, Out>): void {
         const err = error instanceof Error ? error : new Error(String(error));
         if (this.listenerCount('error') > 0) {
             this.emit('error', err, ws);
@@ -541,7 +600,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
      * upgraded by your own server code) are checked here and closed on rejection. Resolves `true` when the
      * socket was accepted, `false` when it was rejected (and closed).
      */
-    async add(ws: ReferencedWebSocket, req: IncomingMessage): Promise<boolean> {
+    async add(ws: ReferencedWebSocket<In, Out>, req: IncomingMessage): Promise<boolean> {
         try {
             if (!this.authorized.has(req)) {
                 const rejection = await this.authorize(req);
@@ -562,6 +621,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
 
             // Store parameters and add socket
             ws.params = Object.fromEntries(params.entries());
+            ws.codec = this.codec;
             this.sockets.set(ws.ref, ws);
             this.watchHeartbeat(ws);
 
@@ -675,13 +735,24 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
         return `${this.path}` + (this.config.useConnectionKeys ? `?key=${this.generatePendingConnectionKey()}` : '');
     }
 
+    /**
+     * Encodes `message` once with the endpoint's codec and sends it to every open socket (or those
+     * `filter` selects).
+     */
+    broadcastMessage(message: Out, options?: {
+        filter?: (ws: ReferencedWebSocket<In, Out>) => boolean;
+        compress?: boolean;
+    }, cb?: (errors: Error[]) => void): void {
+        this.broadcast(this.codec.encode(message), {...options, binary: false}, cb);
+    }
+
     // Enhanced broadcast with error handling
     broadcast(data: BufferLike, options?: {
         mask?: boolean;
         binary?: boolean;
         compress?: boolean;
         fin?: boolean;
-        filter?: (ws: ReferencedWebSocket) => boolean;
+        filter?: (ws: ReferencedWebSocket<In, Out>) => boolean;
     }, cb?: (errors: Error[]) => void): void {
         const errors: Error[] = [];
         const sockets = options?.filter
@@ -930,6 +1001,11 @@ export type WebSocketEndpointConfig = {
      */
     maxPayload?: number;
     /**
+     * How `sendMessage`, `onMessage` and `broadcastMessage` encode messages. Must match the client's
+     * `codec`. Default `'json'`.
+     */
+    codec?: CodecOption;
+    /**
      * Max connection attempts per client per window. Clients are told apart by IP address (see
      * {@link clientAddress}; IPv6 addresses share a limit per /64), or by `key` when given.
      */
@@ -966,7 +1042,8 @@ export class WebSocketRawEndpointController implements GenericWebSocketEndpointC
     }
 }
 
-export type UseConnectionHandler = (ws: ReferencedWebSocket, controller: WebSocketEndpointController) => unknown;
+export type UseConnectionHandler<In = unknown, Out = unknown> =
+    (ws: ReferencedWebSocket<In, Out>, controller: WebSocketEndpointController<In, Out>) => unknown;
 
 /**
  * Backs `use()`. A route can serve many per-request connections at once, so every `use()` call gets its own
@@ -993,8 +1070,8 @@ export class WebSocketRequestEndpointController implements GenericWebSocketEndpo
     /**
      * Creates a single-connection controller and returns its connection URL.
      */
-    create(connectionHandler: UseConnectionHandler, config?: Omit<WebSocketEndpointConfig, 'disposer' | 'limit' | 'path'>): string {
-        const controller: WebSocketEndpointController = new WebSocketEndpointController(this.path, {
+    create<In = unknown, Out = unknown>(connectionHandler: UseConnectionHandler<In, Out>, config?: Omit<WebSocketEndpointConfig, 'disposer' | 'limit' | 'path'>): string {
+        const controller: WebSocketEndpointController<In, Out> = new WebSocketEndpointController<In, Out>(this.path, {
             ...config,
             limit: 1,
             // A key is what routes the upgrade to this controller, so `use()` endpoints always need one.
@@ -1175,14 +1252,14 @@ export const WebSockets = {
      * Registers (or returns the existing) long-lived endpoint for a route.
      * @throws when the route is already registered by `use()` or `raw()`
      */
-    continuous(route: string | RequestEventLike | URL, config?: Omit<WebSocketEndpointConfig, 'disposer' | "path">) {
+    continuous<In = unknown, Out = unknown>(route: string | RequestEventLike | URL, config?: Omit<WebSocketEndpointConfig, 'disposer' | "path">): WebSocketEndpointController<In, Out> {
         const path = routePath(route);
         const existing = allowed_routes.get(path);
         if (existing) {
-            if (existing instanceof WebSocketEndpointController) return existing;
+            if (existing instanceof WebSocketEndpointController) return existing as WebSocketEndpointController<In, Out>;
             throw alreadyRegistered(path, existing);
         }
-        const controller: WebSocketEndpointController = new WebSocketEndpointController(path, {
+        const controller: WebSocketEndpointController<In, Out> = new WebSocketEndpointController<In, Out>(path, {
             ...config,
             disposer: () => unregister(path, controller),
         });
@@ -1196,7 +1273,7 @@ export const WebSockets = {
      * `useConnectionKeys: false` is ignored: the key is what routes the connection to this call's handler.
      * @throws when the route is already registered by `continuous()` or `raw()`
      */
-    use(route: string | RequestEventLike | URL, connectionHandler: UseConnectionHandler, config?: Omit<WebSocketEndpointConfig, 'disposer' | 'limit' | 'path'>): string {
+    use<In = unknown, Out = unknown>(route: string | RequestEventLike | URL, connectionHandler: UseConnectionHandler<In, Out>, config?: Omit<WebSocketEndpointConfig, 'disposer' | 'limit' | 'path'>): string {
         const path = routePath(route);
         let endpoint = allowed_routes.get(path);
         if (!endpoint) {

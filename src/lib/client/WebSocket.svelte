@@ -4,7 +4,11 @@
         ActionSocket,
         ActionSocketError,
         defaultShouldReconnect,
+        jsonCodec,
+        devalueCodec,
         type ActionSocketController,
+        type Codec,
+        type CodecOption,
         type ReconnectOptions,
         type ActionSocketResult,
         type WebSocketEvents,
@@ -13,7 +17,7 @@
     } from "./actions.js";
 </script>
 
-<script lang="ts" generics="T = any">
+<script lang="ts" generics="T = any, S = any">
 
     import {onDestroy, onMount} from "svelte";
     import {
@@ -24,6 +28,7 @@
         type ReconnectOptions,
         type WebSocketProps
     } from "./actions.js";
+    import {resolveCodec} from "../codec.js";
 
     let {
         onmessage,
@@ -34,7 +39,9 @@
         auto_open = true,
         max_messages = 1000,
         ...restProps
-    }: WebSocketProps<T> = $props();
+    }: WebSocketProps<T, S> = $props();
+
+    const codec = () => restProps.codec === undefined ? undefined : resolveCodec(restProps.codec);
 
     let ws = $state<WebSocket>();
     let open = $state<boolean>(false);
@@ -120,7 +127,22 @@
         const socket = new WebSocket(url, protocols);
         ws = socket;
         socket.binaryType = restProps.binaryType ? restProps.binaryType : 'arraybuffer';
-        socket.onmessage = (event) => {
+        socket.onmessage = (raw) => {
+            let event: MessageEvent = raw;
+            const messageCodec = codec();
+            if (messageCodec) {
+                try {
+                    if (typeof raw.data !== 'string') throw new TypeError('Received a binary frame on a socket with a codec');
+                    event = new MessageEvent('message', {
+                        data: messageCodec.decode(raw.data),
+                        origin: raw.origin,
+                        lastEventId: raw.lastEventId
+                    });
+                } catch (e) {
+                    restProps.onerror?.(new ActionSocketError(e));
+                    return;
+                }
+            }
             onmessage?.(event)
             if (ws === socket) data = append(data, event.data);
         }
@@ -155,7 +177,7 @@
         return opening;
     }
 
-    const ctrl: ActionSocketController = {
+    const ctrl: ActionSocketController<S> = {
         open() {
             cancelReconnect();
             return start();
@@ -168,6 +190,12 @@
             if (!ws) return
             if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) return
             ws.close(code, reason)
+        },
+        send(message: S) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+            const messageCodec = codec();
+            ws.send(messageCodec ? messageCodec.encode(message) : message as Parameters<WebSocket['send']>[0]);
+            return true;
         },
         get websocket() {
             return ws;

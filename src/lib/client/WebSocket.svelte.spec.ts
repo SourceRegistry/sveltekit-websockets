@@ -1,7 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {render} from 'vitest-browser-svelte';
 import {createRawSnippet} from 'svelte';
-import {stringify} from 'devalue';
+import {parse, stringify} from 'devalue';
 import WebSocketComponent from './WebSocket.svelte';
 import type {ActionSocketController} from './actions.js';
 
@@ -27,7 +27,10 @@ class FakeWebSocket {
         this.readyState = FakeWebSocket.CLOSED;
     }
 
-    send() {
+    sent: unknown[] = [];
+
+    send(data: unknown) {
+        this.sent.push(data);
     }
 
     simulateOpen() {
@@ -370,5 +373,95 @@ describe('WebSocket component data', () => {
         const onmessage = vi.fn();
         expect(await received({max_messages: 0, onmessage}, 3)).toEqual([]);
         expect(onmessage).toHaveBeenCalledTimes(3);
+    });
+});
+
+describe('WebSocket component codec', () => {
+    const messages = createRawSnippet((getData: () => unknown[]) => ({
+        render: () => '<output></output>',
+        setup: (node: Element) => {
+            $effect(() => {
+                node.textContent = JSON.stringify(getData());
+            });
+        }
+    }));
+
+    const opened = async (props: Record<string, unknown>) => {
+        const mounted = await mount({url: 'ws://example.test/socket', messages, ...props});
+        last().simulateOpen();
+        return mounted;
+    };
+
+    const shown = async (container: HTMLElement) => {
+        await flush();
+        return JSON.parse(container.querySelector('output')?.textContent || 'null');
+    };
+
+    it('keeps raw data without a codec', async () => {
+        const {container} = await opened({});
+        last().simulateMessage('{"n":1}');
+
+        expect(await shown(container)).toEqual(['{"n":1}']);
+    });
+
+    it("decodes messages with 'json' for data and onmessage", async () => {
+        const onmessage = vi.fn();
+        const {container} = await opened({codec: 'json', onmessage});
+        last().simulateMessage('{"n":1}');
+
+        expect(await shown(container)).toEqual([{n: 1}]);
+        expect(onmessage.mock.calls[0][0].data).toEqual({n: 1});
+    });
+
+    it('skips a message that fails to decode and reports it through onerror', async () => {
+        const onerror = vi.fn();
+        const {container} = await opened({codec: 'json', onerror});
+        last().simulateMessage('{broken');
+        last().simulateMessage(new ArrayBuffer(4));
+        last().simulateMessage('{"n":2}');
+
+        expect(await shown(container)).toEqual([{n: 2}]);
+        expect(onerror).toHaveBeenCalledTimes(2);
+    });
+
+    it("decodes Dates with 'devalue'", async () => {
+        const onmessage = vi.fn();
+        await opened({codec: 'devalue', onmessage});
+        last().simulateMessage(stringify({at: new Date(1000)}));
+
+        const message = onmessage.mock.calls[0][0].data;
+        expect(message.at).toBeInstanceOf(Date);
+        expect(message.at.getTime()).toBe(1000);
+    });
+
+    it('lets a custom codec validate', async () => {
+        const onerror = vi.fn();
+        const codec = {
+            encode: JSON.stringify,
+            decode: (data: string) => {
+                const value = JSON.parse(data);
+                if (typeof value.n !== 'number') throw new Error('invalid');
+                return value;
+            }
+        };
+        const {container} = await opened({codec, onerror});
+        last().simulateMessage('{"n":"x"}');
+        last().simulateMessage('{"n":3}');
+
+        expect(await shown(container)).toEqual([{n: 3}]);
+        expect(onerror).toHaveBeenCalledTimes(1);
+    });
+
+    it('send() encodes with the codec, sends raw without one, and refuses while not open', async () => {
+        const typed = await mount({url: 'ws://example.test/a', codec: 'devalue'});
+        expect(typed.ctrl.send({at: new Date(5)})).toBe(false);
+        last().simulateOpen();
+        expect(typed.ctrl.send({at: new Date(5)})).toBe(true);
+        expect(parse(last().sent[0] as string).at.getTime()).toBe(5);
+
+        const raw = await mount({url: 'ws://example.test/b'});
+        last().simulateOpen();
+        raw.ctrl.send('plain');
+        expect(last().sent).toEqual(['plain']);
     });
 });

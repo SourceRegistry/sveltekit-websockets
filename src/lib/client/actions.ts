@@ -1,5 +1,8 @@
 import { parse } from "devalue";
 import type { Snippet } from "svelte";
+import type { CodecOption } from "../codec.js";
+
+export { jsonCodec, devalueCodec, type Codec, type CodecOption } from "../codec.js";
 
 export type ActionSocketResult = {
     url: string,
@@ -7,11 +10,17 @@ export type ActionSocketResult = {
     open(): WebSocket
 }
 
-export type ActionSocketController = {
+/** @typeParam S - messages sent with {@link ActionSocketController.send} */
+export type ActionSocketController<S = any> = {
     /** Connects (re-running the action, if any). Cancels a scheduled reconnect. */
     open(): Promise<void>,
     /** Closes the socket and cancels any pending connect or scheduled reconnect. */
     close(code?: number, reason?: string): void,
+    /**
+     * Sends a message: encoded with `codec` when one is set, otherwise passed to `WebSocket.send` as is.
+     * Returns `false` (and sends nothing) when the socket isn't open.
+     */
+    send(message: S): boolean,
     get websocket(): WebSocket | undefined,
     get isOpen(): boolean,
     get state(): number | undefined,
@@ -54,11 +63,11 @@ export type WebSocketEvents<T = any> = {
     onreconnect?: (attempt: number, delay: number) => unknown,
 }
 
-export type WebSocketSnippets<T = any> = {
+export type WebSocketSnippets<T = any, S = any> = {
     children?: Snippet<[WebSocket]>
     messages?: Snippet<[MessageEvent<T>['data'][], WebSocket]>
     message?: Snippet<[MessageEvent<T>['data'], number, WebSocket]>,
-    controller?: Snippet<[ActionSocketController]>
+    controller?: Snippet<[ActionSocketController<S>]>
 }
 
 type ActionResult<Success = Record<string, unknown>> =
@@ -67,7 +76,11 @@ type ActionResult<Success = Record<string, unknown>> =
     | { type: 'redirect', location: string }
     | { type: 'error', error: unknown };
 
-export type WebSocketProps<T = any> =
+/**
+ * @typeParam T - messages received (decoded with `codec` when set)
+ * @typeParam S - messages sent with `ctrl.send`
+ */
+export type WebSocketProps<T = any, S = any> =
     ({ url: string | URL, protocols?: (string | string[]) } | {
         action: string,
         devalue?: boolean,
@@ -82,10 +95,16 @@ export type WebSocketProps<T = any> =
          */
         max_messages?: number,
         binaryType?: BinaryType,
+        /**
+         * Decode received messages (and encode `ctrl.send`) with this codec; must match the server's
+         * `codec`. `data`, the snippets and `onmessage` then get decoded messages. A message that can't be
+         * decoded is skipped and reported through `onerror`. Default: none (raw `event.data`).
+         */
+        codec?: CodecOption,
         /** Reconnect automatically; `true` uses the defaults of {@link ReconnectOptions}. Default `false`. */
         reconnect?: boolean | ReconnectOptions
     } &
-    WebSocketSnippets<T> &
+    WebSocketSnippets<T, S> &
     WebSocketEvents<T>
 
 /**

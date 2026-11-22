@@ -744,3 +744,166 @@ describe('unregistered paths', () => {
         expect(await rejection('/not-registered')).toEqual({status: 404, body: 'No WebSocket endpoint at this path'});
     });
 });
+
+describe('typed messages', () => {
+    type ClientMessage = { type: 'say', text: string };
+    type ServerMessage = { type: 'said', text: string, at: Date };
+
+    // Collects text frames from the server.
+    const client = (path: string) => {
+        const ws = new WsClient(`ws://127.0.0.1:${port}${path}`);
+        ws.on('error', () => {});
+        const received: string[] = [];
+        ws.on('message', (data) => received.push(data.toString()));
+        const opened = new Promise<void>((resolve) => ws.once('open', () => resolve()));
+        const next = () => new Promise<string>((resolve) => ws.once('message', (data) => resolve(data.toString())));
+        return {ws, opened, received, next};
+    };
+
+    it('decodes incoming and encodes outgoing messages as JSON by default', async () => {
+        const chat = WebSockets.continuous<ClientMessage, ServerMessage>('/typed-json', {useConnectionKeys: false});
+        chat.on('connect', (socket) => {
+            socket.onMessage((message) => {
+                socket.sendMessage({type: 'said', text: message.text.toUpperCase(), at: new Date(0)});
+            });
+        });
+
+        const c = client('/typed-json');
+        await c.opened;
+        const reply = c.next();
+        c.ws.send(JSON.stringify({type: 'say', text: 'hi'}));
+
+        expect(JSON.parse(await reply)).toEqual({type: 'said', text: 'HI', at: '1970-01-01T00:00:00.000Z'});
+        c.ws.close();
+    });
+
+    it("round-trips Dates and Maps with 'devalue'", async () => {
+        const {parse, stringify} = await import('devalue');
+        const chat = WebSockets.continuous<{ when: Date }, { echoed: Date, seen: Map<string, number> }>('/typed-devalue', {
+            useConnectionKeys: false,
+            codec: 'devalue'
+        });
+        chat.on('connect', (socket) => {
+            socket.onMessage((message) => socket.sendMessage({echoed: message.when, seen: new Map([['a', 1]])}));
+        });
+
+        const c = client('/typed-devalue');
+        await c.opened;
+        const reply = c.next();
+        c.ws.send(stringify({when: new Date(1000)}));
+
+        const decoded = parse(await reply);
+        expect(decoded.echoed).toBeInstanceOf(Date);
+        expect(decoded.echoed.getTime()).toBe(1000);
+        expect(decoded.seen).toEqual(new Map([['a', 1]]));
+        c.ws.close();
+    });
+
+    it('broadcasts one encoded message to every open socket', async () => {
+        const room = WebSockets.continuous<never, { n: number }>('/typed-broadcast', {useConnectionKeys: false});
+        const connected = new Promise<void>((resolve) => {
+            let count = 0;
+            room.on('connect', () => ++count === 2 && resolve());
+        });
+
+        const a = client('/typed-broadcast');
+        const b = client('/typed-broadcast');
+        await connected;
+        const replies = Promise.all([a.next(), b.next()]);
+        room.broadcastMessage({n: 1});
+
+        expect(await replies).toEqual(['{"n":1}', '{"n":1}']);
+        a.ws.close();
+        b.ws.close();
+    });
+
+    it('skips messages that fail to decode, reports them and keeps the connection open', async () => {
+        const chat = WebSockets.continuous<ClientMessage, ServerMessage>('/typed-bad', {useConnectionKeys: false});
+        const errors: string[] = [];
+        const received: ClientMessage[] = [];
+        chat.on('error', (error) => errors.push(error.message));
+        chat.on('connect', (socket) => socket.onMessage((message) => received.push(message)));
+
+        const c = client('/typed-bad');
+        await c.opened;
+        c.ws.send('{not json');
+        c.ws.send(Buffer.from('binary'), {binary: true});
+        c.ws.send(JSON.stringify({type: 'say', text: 'ok'}));
+        await sleep(50);
+
+        expect(received).toEqual([{type: 'say', text: 'ok'}]);
+        expect(errors).toHaveLength(2);
+        expect(errors[1]).toMatch(/binary/);
+        expect(c.ws.readyState).toBe(WsClient.OPEN);
+        c.ws.close();
+    });
+
+    it('lets a custom codec validate, and onMessage take an error handler and be removed', async () => {
+        const strict = {
+            encode: (message: ServerMessage) => JSON.stringify(message),
+            decode: (data: string) => {
+                const value = JSON.parse(data);
+                if (value?.type !== 'say' || typeof value.text !== 'string') throw new Error('invalid message');
+                return value as ClientMessage;
+            }
+        };
+        const seen: string[] = [];
+        const rejected: string[] = [];
+        const chat = WebSockets.continuous<ClientMessage, ServerMessage>('/typed-custom', {useConnectionKeys: false, codec: strict});
+        chat.on('connect', (socket) => {
+            const off = socket.onMessage((message) => {
+                seen.push(message.text);
+                off();
+            }, (error) => rejected.push(error.message));
+        });
+
+        const c = client('/typed-custom');
+        await c.opened;
+        c.ws.send(JSON.stringify({type: 'shout', text: 1}));
+        c.ws.send(JSON.stringify({type: 'say', text: 'first'}));
+        c.ws.send(JSON.stringify({type: 'say', text: 'second'}));
+        await sleep(50);
+
+        expect(rejected).toEqual(['invalid message']);
+        expect(seen).toEqual(['first']);
+        c.ws.close();
+    });
+
+    it('applies a use() codec to that connection', async () => {
+        const url = WebSockets.use<{ n: number }, { doubled: number }>('/typed-use', (socket) => {
+            socket.onMessage((message) => socket.sendMessage({doubled: message.n * 2}));
+        }, {codec: 'json'});
+
+        const c = client(url);
+        await c.opened;
+        const reply = c.next();
+        c.ws.send('{"n":21}');
+
+        expect(await reply).toBe('{"doubled":42}');
+        c.ws.close();
+    });
+
+    it('reports a message that cannot be encoded through the callback', async () => {
+        const chat = WebSockets.continuous<never, unknown>('/typed-encode', {useConnectionKeys: false});
+        const result = new Promise<Error | undefined>((resolve) =>
+            chat.on('connect', (socket) => socket.sendMessage(undefined, resolve)));
+
+        const c = client('/typed-encode');
+        expect((await result)?.message).toBe('Message could not be encoded');
+        c.ws.close();
+    });
+
+    it('checks message types at compile time', () => {
+        const chat = WebSockets.continuous<ClientMessage, ServerMessage>('/typed-types', {useConnectionKeys: false});
+        chat.on('connect', (socket) => {
+            // @ts-expect-error -- not a ServerMessage
+            socket.sendMessage({type: 'say', text: 'x'});
+            socket.onMessage((message) => {
+                // @ts-expect-error -- ClientMessage has no `at`
+                void message.at;
+            });
+        });
+        // @ts-expect-error -- broadcastMessage takes ServerMessage
+        expect(() => chat.broadcastMessage({nope: true})).not.toThrow();
+    });
+});
