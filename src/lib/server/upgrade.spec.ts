@@ -229,3 +229,123 @@ describe('WebSocketError', () => {
         });
     });
 });
+
+describe('allowedOrigins', () => {
+    // Resolves with 101 when the handshake succeeds, otherwise the HTTP status of the rejection.
+    const handshake = (path: string, options: { origin?: string, headers?: Record<string, string> } = {}) =>
+        new Promise<number>((resolve) => {
+            const ws = new WsClient(`ws://127.0.0.1:${port}${path}`, options);
+            ws.on('error', () => {});
+            ws.on('open', () => {
+                resolve(101);
+                ws.close();
+            });
+            ws.on('unexpected-response', (req, res) => {
+                resolve(res.statusCode ?? 0);
+                req.destroy();
+            });
+        });
+
+    const self = () => `http://127.0.0.1:${port}`;
+
+    it('defaults to same-origin and allows requests without an Origin header', async () => {
+        WebSockets.continuous('/origin-default', {useConnectionKeys: false});
+
+        expect(await handshake('/origin-default')).toBe(101);
+        expect(await handshake('/origin-default', {origin: self()})).toBe(101);
+        expect(await handshake('/origin-default', {origin: 'http://evil.test'})).toBe(403);
+        expect(await handshake('/origin-default', {origin: 'null'})).toBe(403);
+    });
+
+    it('matches X-Forwarded-Host, including an explicit default port', async () => {
+        WebSockets.continuous('/origin-forwarded', {useConnectionKeys: false});
+
+        expect(await handshake('/origin-forwarded', {
+            origin: 'https://app.example.com',
+            headers: {'x-forwarded-host': 'app.example.com'}
+        })).toBe(101);
+        expect(await handshake('/origin-forwarded', {
+            origin: 'https://app.example.com',
+            headers: {'x-forwarded-host': 'app.example.com:443'}
+        })).toBe(101);
+        expect(await handshake('/origin-forwarded', {
+            origin: 'https://evil.test',
+            headers: {'x-forwarded-host': 'app.example.com'}
+        })).toBe(403);
+    });
+
+    it('accepts the ORIGIN environment variable', async () => {
+        vi.stubEnv('ORIGIN', 'https://public.example.com');
+        try {
+            WebSockets.continuous('/origin-env', {useConnectionKeys: false});
+            expect(await handshake('/origin-env', {origin: 'https://public.example.com'})).toBe(101);
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
+    it('accepts only listed origins, compared after normalizing', async () => {
+        WebSockets.continuous('/origin-list', {
+            useConnectionKeys: false,
+            allowedOrigins: ['HTTPS://Trusted.example.com:443/']
+        });
+
+        expect(await handshake('/origin-list', {origin: 'https://trusted.example.com'})).toBe(101);
+        expect(await handshake('/origin-list', {origin: self()})).toBe(403);
+        expect(await handshake('/origin-list', {origin: 'https://evil.test'})).toBe(403);
+    });
+
+    it("allows any origin with '*'", async () => {
+        WebSockets.continuous('/origin-any', {useConnectionKeys: false, allowedOrigins: '*'});
+
+        expect(await handshake('/origin-any', {origin: 'https://evil.test'})).toBe(101);
+    });
+
+    it('lets a function decide, and treats a throw as a rejection', async () => {
+        WebSockets.continuous('/origin-fn', {
+            useConnectionKeys: false,
+            allowedOrigins: async (origin) => origin.endsWith('.trusted.test')
+        });
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            WebSockets.continuous('/origin-throws', {
+                useConnectionKeys: false,
+                allowedOrigins: () => {
+                    throw new Error('boom');
+                }
+            });
+
+            expect(await handshake('/origin-fn', {origin: 'https://a.trusted.test'})).toBe(101);
+            expect(await handshake('/origin-fn', {origin: 'https://evil.test'})).toBe(403);
+            expect(await handshake('/origin-throws', {origin: 'https://a.trusted.test'})).toBe(403);
+            expect(consoleError).toHaveBeenCalled();
+        } finally {
+            consoleError.mockRestore();
+        }
+    });
+
+    it('rejects before beforeUpgrade runs', async () => {
+        const beforeUpgrade = vi.fn(({accept}: { accept: () => unknown }) => accept());
+        WebSockets.continuous('/origin-before', {useConnectionKeys: false}).beforeUpgrade = beforeUpgrade;
+
+        expect(await handshake('/origin-before', {origin: 'https://evil.test'})).toBe(403);
+        expect(beforeUpgrade).not.toHaveBeenCalled();
+    });
+
+    it('applies to use() and releases the endpoint on rejection', async () => {
+        const handler = vi.fn();
+        const url = WebSockets.use('/origin-use', handler);
+
+        expect(await handshake(url, {origin: 'https://evil.test'})).toBe(403);
+        expect(handler).not.toHaveBeenCalled();
+        expect(() => WebSockets.continuous('/origin-use')).not.toThrow();
+    });
+
+    it('applies a use() config to that endpoint', async () => {
+        const url = WebSockets.use('/origin-use-config', (socket) => socket.send('ok'), {
+            allowedOrigins: ['https://trusted.example.com']
+        });
+
+        expect(await handshake(url, {origin: 'https://trusted.example.com'})).toBe(101);
+    });
+});

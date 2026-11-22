@@ -323,6 +323,28 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
         return randomBytes(32).toString('base64url');
     }
 
+    /**
+     * Checks the upgrade request's `Origin` header against `config.allowedOrigins`. A throwing custom check
+     * counts as a rejection.
+     */
+    async isOriginAllowed(req: IncomingMessage): Promise<boolean> {
+        const origin = req.headers.origin;
+        if (!origin) return true;
+
+        const allowed = this.config.allowedOrigins ?? 'same-origin';
+        if (allowed === '*') return true;
+
+        try {
+            if (typeof allowed === 'function') return await allowed(origin, req);
+            if (allowed === 'same-origin') return isSameOrigin(origin, req);
+            const normalized = normalizeOrigin(origin);
+            return normalized !== undefined && allowed.some((entry) => normalizeOrigin(entry) === normalized);
+        } catch (error) {
+            this.reportError(error);
+            return false;
+        }
+    }
+
     private checkRateLimit(req: IncomingMessage): boolean {
         if (!this.config.rateLimit) return true;
 
@@ -700,8 +722,30 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
 }
 
 // Enhanced configuration
+/**
+ * Which browser origins may open a connection:
+ * - `'same-origin'` (default): the `Origin` host must match the request's `Host` or `X-Forwarded-Host`, or
+ *   the `Origin` must equal the `ORIGIN` environment variable (as used by adapter-node)
+ * - `'*'`: any origin
+ * - a list of origins, e.g. `['https://app.example.com']`
+ * - a function deciding per request
+ *
+ * Requests without an `Origin` header are always allowed: browsers send one on every WebSocket handshake,
+ * so only non-browser clients (which cross-site WebSocket hijacking does not apply to) omit it.
+ */
+export type AllowedOrigins =
+    | 'same-origin'
+    | '*'
+    | readonly string[]
+    | ((origin: string, req: IncomingMessage) => MaybePromise<boolean>);
+
 export type WebSocketEndpointConfig = {
     authHandler?: (req: IncomingMessage) => MaybePromise<boolean>;
+    /**
+     * Which browser origins may connect; rejected upgrades get HTTP 403. Default `'same-origin'`.
+     * @see AllowedOrigins
+     */
+    allowedOrigins?: AllowedOrigins;
     limit?: number;
     useConnectionKeys?: boolean;
     pendingKeyExpiration?: number;
@@ -836,6 +880,49 @@ export class WebSocketRequestEndpointController implements GenericWebSocketEndpo
 
 function parseUrl(req: IncomingMessage): URL {
     return new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+}
+
+/** `scheme://host[:port]` with default ports dropped and the host lowercased, or `undefined` if invalid. */
+function normalizeOrigin(origin: string): string | undefined {
+    try {
+        const url = new URL(origin);
+        return url.origin === 'null' ? undefined : url.origin;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * Same-origin check for an upgrade request. Only the host is compared, not the scheme, since a TLS-terminating
+ * proxy turns `https` into a plain request. A cross-site page can't forge `Host` or `X-Forwarded-Host`: the
+ * browser sets `Host` to the target server and a page can't add headers to a WebSocket handshake.
+ */
+function isSameOrigin(origin: string, req: IncomingMessage): boolean {
+    let url: URL;
+    try {
+        url = new URL(origin);
+    } catch {
+        return false;
+    }
+    if (url.origin === 'null') return false;
+
+    const envOrigin = process.env.ORIGIN ? normalizeOrigin(process.env.ORIGIN) : undefined;
+    if (envOrigin && envOrigin === url.origin) return true;
+
+    const forwarded = req.headers['x-forwarded-host'];
+    const hosts = [
+        req.headers.host,
+        ...(Array.isArray(forwarded) ? forwarded : [forwarded]).flatMap((value) => value?.split(',') ?? [])
+    ];
+    return hosts.some((host) => {
+        if (!host?.trim()) return false;
+        try {
+            // Parse with the origin's scheme so a default port written out (`host:443`) compares equal.
+            return new URL(`${url.protocol}//${host.trim()}`).host === url.host;
+        } catch {
+            return false;
+        }
+    });
 }
 
 function routePath(route: string | RequestEventLike | URL): string {
@@ -978,6 +1065,10 @@ export const WebSockets = {
                 return;
             }
             if (controller instanceof WebSocketEndpointController) {
+                if (!await controller.isOriginAllowed(req)) {
+                    rejectUpgrade(socket, 403, 'Origin not allowed');
+                    return;
+                }
                 if (!controller.beforeUpgrade) {
                     controller.beforeUpgrade = ({accept}) => accept();
                 }
@@ -988,6 +1079,11 @@ export const WebSockets = {
                 });
             } else if (controller instanceof WebSocketRequestEndpointController) {
                 const endpoint = controller.claim(url.searchParams.get('key'));
+                if (endpoint && !await endpoint.isOriginAllowed(req)) {
+                    endpoint.destroy();
+                    rejectUpgrade(socket, 403, 'Origin not allowed');
+                    return;
+                }
                 server.handleUpgrade(req, socket, head, async (ws, req) => {
                     if (!endpoint) {
                         ws.close(WebSocketError.INVALID_KEY, 'Invalid or expired connection key');
