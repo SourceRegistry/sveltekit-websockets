@@ -2,7 +2,8 @@ import {createServer, type Server} from 'node:http';
 import type {AddressInfo} from 'node:net';
 import {afterAll, afterEach, beforeAll, describe, expect, it, vi} from 'vitest';
 import {WebSocket as WsClient} from 'ws';
-import {WebSocketError, WebSockets} from './index.js';
+import {clientAddress, WebSocketError, WebSockets} from './index.js';
+import type {IncomingMessage} from 'node:http';
 
 let httpServer: Server;
 let port: number;
@@ -474,5 +475,106 @@ describe('maxPayload', () => {
         }, {maxPayload: 8});
 
         expect(await roundTrip(url, 9)).toMatchObject({code: 1009});
+    });
+});
+
+describe('clientAddress()', () => {
+    const request = (remoteAddress: string, headers: Record<string, string> = {}) =>
+        ({socket: {remoteAddress}, headers}) as unknown as IncomingMessage;
+
+    afterEach(() => {
+        vi.unstubAllEnvs();
+    });
+
+    it('uses the TCP peer and ignores forwarding headers unless configured', () => {
+        expect(clientAddress(request('10.0.0.1', {'x-forwarded-for': '6.6.6.6'}))).toBe('10.0.0.1');
+    });
+
+    it('strips the IPv4-mapped IPv6 prefix', () => {
+        expect(clientAddress(request('::ffff:192.0.2.7'))).toBe('192.0.2.7');
+    });
+
+    it('takes the address xffDepth entries from the right, ignoring what the client prepended', () => {
+        const req = request('10.0.0.1', {'x-forwarded-for': '6.6.6.6, 203.0.113.5, 10.0.0.2'});
+
+        expect(clientAddress(req, {addressHeader: 'x-forwarded-for'})).toBe('10.0.0.2');
+        expect(clientAddress(req, {addressHeader: 'X-Forwarded-For', xffDepth: 2})).toBe('203.0.113.5');
+    });
+
+    it('falls back to the TCP peer when the header is missing or too short', () => {
+        expect(clientAddress(request('10.0.0.1'), {addressHeader: 'x-forwarded-for'})).toBe('10.0.0.1');
+        expect(clientAddress(request('10.0.0.1', {'x-forwarded-for': '203.0.113.5'}),
+            {addressHeader: 'x-forwarded-for', xffDepth: 2})).toBe('10.0.0.1');
+    });
+
+    it('reads any other header as-is', () => {
+        expect(clientAddress(request('10.0.0.1', {'x-real-ip': ' 203.0.113.9 '}), {addressHeader: 'x-real-ip'}))
+            .toBe('203.0.113.9');
+    });
+
+    it('defaults to the ADDRESS_HEADER and XFF_DEPTH environment variables', () => {
+        vi.stubEnv('ADDRESS_HEADER', 'X-Forwarded-For');
+        vi.stubEnv('XFF_DEPTH', '2');
+
+        expect(clientAddress(request('10.0.0.1', {'x-forwarded-for': '203.0.113.5, 10.0.0.2'}))).toBe('203.0.113.5');
+    });
+});
+
+describe('rateLimit', () => {
+    const attempt = (path: string, headers: Record<string, string> = {}) => new Promise<'open' | number>((resolve) => {
+        const ws = new WsClient(`ws://127.0.0.1:${port}${path}`, {headers});
+        ws.on('error', () => {});
+        ws.on('close', (code) => resolve(code === WebSocketError.RATE_LIMITED ? code : 'open'));
+        ws.on('open', () => setTimeout(() => ws.close(), 20));
+    });
+
+    afterEach(() => {
+        vi.unstubAllEnvs();
+    });
+
+    it('counts all attempts from one address against one limit, whatever the User-Agent', async () => {
+        WebSockets.continuous('/rl-ua', {useConnectionKeys: false, rateLimit: {max: 2, window: 60_000}});
+
+        const results = [];
+        for (const agent of ['a', 'b', 'c']) results.push(await attempt('/rl-ua', {'user-agent': agent}));
+
+        expect(results).toEqual(['open', 'open', WebSocketError.RATE_LIMITED]);
+    });
+
+    it('limits each client behind a proxy separately', async () => {
+        vi.stubEnv('ADDRESS_HEADER', 'x-forwarded-for');
+        WebSockets.continuous('/rl-proxy', {useConnectionKeys: false, rateLimit: {max: 1, window: 60_000}});
+
+        expect(await attempt('/rl-proxy', {'x-forwarded-for': '203.0.113.1'})).toBe('open');
+        expect(await attempt('/rl-proxy', {'x-forwarded-for': '203.0.113.2'})).toBe('open');
+        expect(await attempt('/rl-proxy', {'x-forwarded-for': '203.0.113.1'})).toBe(WebSocketError.RATE_LIMITED);
+        // A spoofed entry prepended by the client doesn't give it a fresh limit.
+        expect(await attempt('/rl-proxy', {'x-forwarded-for': '1.1.1.1, 203.0.113.1'})).toBe(WebSocketError.RATE_LIMITED);
+    });
+
+    it('shares one limit across an IPv6 /64', async () => {
+        vi.stubEnv('ADDRESS_HEADER', 'x-real-ip');
+        WebSockets.continuous('/rl-ipv6', {useConnectionKeys: false, rateLimit: {max: 1, window: 60_000}});
+
+        expect(await attempt('/rl-ipv6', {'x-real-ip': '2001:db8:0:1::1'})).toBe('open');
+        expect(await attempt('/rl-ipv6', {'x-real-ip': '2001:db8:0:1:ffff::2'})).toBe(WebSocketError.RATE_LIMITED);
+        expect(await attempt('/rl-ipv6', {'x-real-ip': '2001:db8:0:2::1'})).toBe('open');
+    });
+
+    it('uses a custom key, and exempts requests it returns undefined for', async () => {
+        WebSockets.continuous('/rl-key', {
+            useConnectionKeys: false,
+            rateLimit: {
+                max: 1,
+                window: 60_000,
+                key: (req) => req.headers['x-user'] === 'admin' ? undefined : String(req.headers['x-user'])
+            }
+        });
+
+        expect(await attempt('/rl-key', {'x-user': 'alice'})).toBe('open');
+        expect(await attempt('/rl-key', {'x-user': 'bob'})).toBe('open');
+        expect(await attempt('/rl-key', {'x-user': 'alice'})).toBe(WebSocketError.RATE_LIMITED);
+        expect(await attempt('/rl-key', {'x-user': 'admin'})).toBe('open');
+        expect(await attempt('/rl-key', {'x-user': 'admin'})).toBe('open');
     });
 });

@@ -4,6 +4,7 @@ import type {IncomingMessage} from 'node:http';
 import {STATUS_CODES} from 'node:http';
 import {randomBytes, randomUUID} from "node:crypto";
 import {EventEmitter} from "node:events";
+import {isIPv6} from "node:net";
 
 // Enhanced BufferLike type with better type safety
 export type BufferLike =
@@ -37,6 +38,68 @@ type RequestEventLike = { url: URL };
 
 declare global {
     var websockets: typeof WebSockets;
+}
+
+export type ClientAddressOptions = {
+    /**
+     * Header holding the client address, set by your reverse proxy, e.g. `'x-forwarded-for'` or
+     * `'x-real-ip'`. Default: the `ADDRESS_HEADER` environment variable (as used by adapter-node), else none.
+     */
+    addressHeader?: string;
+    /**
+     * With `x-forwarded-for`, the number of trusted proxies in front of the server: the address is taken
+     * this many entries from the right. Default: the `XFF_DEPTH` environment variable, else `1`.
+     */
+    xffDepth?: number;
+};
+
+/**
+ * The client's IP address, resolved the same way adapter-node's `getClientAddress()` does. Without an
+ * address header this is the TCP peer, which behind a reverse proxy is the proxy itself.
+ *
+ * The header is trusted only when configured: any client can send `X-Forwarded-For`, so only the entries
+ * your own proxies appended (the rightmost `xffDepth`) are used. When the header is missing or shorter than
+ * `xffDepth`, the TCP peer address is used.
+ */
+export function clientAddress(req: IncomingMessage, options: ClientAddressOptions = {}): string {
+    const peer = normalizeAddress(req.socket?.remoteAddress) ?? 'unknown';
+    const header = (options.addressHeader ?? process.env.ADDRESS_HEADER ?? '').trim().toLowerCase();
+    if (!header) return peer;
+
+    const raw = req.headers[header];
+    const value = Array.isArray(raw) ? raw.join(',') : raw;
+    if (!value) return peer;
+
+    if (header === 'x-forwarded-for') {
+        const depth = options.xffDepth ?? (Number.parseInt(process.env.XFF_DEPTH ?? '', 10) || 1);
+        const addresses = value.split(',').map((address) => address.trim()).filter(Boolean);
+        if (depth < 1 || depth > addresses.length) return peer;
+        return normalizeAddress(addresses[addresses.length - depth]) ?? peer;
+    }
+    return normalizeAddress(value) ?? peer;
+}
+
+/** Strips IPv4-mapped IPv6 prefixes (`::ffff:1.2.3.4`), zone ids and brackets. */
+function normalizeAddress(address: string | undefined): string | undefined {
+    if (!address) return undefined;
+    let result = address.trim().replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+    if (/^::ffff:\d+\.\d+\.\d+\.\d+$/i.test(result)) result = result.slice(7);
+    return result || undefined;
+}
+
+/**
+ * The rate-limit bucket for an address. An IPv6 client usually controls a whole /64, so it would otherwise
+ * get a fresh limit for every address it picks from it.
+ */
+function rateLimitKey(address: string): string {
+    if (!isIPv6(address)) return address;
+    const [head, tail = ''] = address.toLowerCase().split('::');
+    const left = head ? head.split(':') : [];
+    const right = address.includes('::') && tail ? tail.split(':') : [];
+    const groups = address.includes('::')
+        ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right]
+        : left;
+    return groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, '')).join(':') + '::/64';
 }
 
 /** Default `WebSocketEndpointConfig.maxPayload`: 1 MiB. */
@@ -356,7 +419,9 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
     private checkRateLimit(req: IncomingMessage): boolean {
         if (!this.config.rateLimit) return true;
 
-        const clientId = this.getClientId(req);
+        const clientId = this.config.rateLimit.key ? this.config.rateLimit.key(req) : rateLimitKey(clientAddress(req));
+        // A custom key may exempt a request by returning undefined.
+        if (clientId === undefined) return true;
         const now = Date.now();
         const limit = this.rateLimitMap.get(clientId);
 
@@ -375,13 +440,6 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
 
         limit.count++;
         return true;
-    }
-
-    private getClientId(req: IncomingMessage): string {
-        // Use IP + User-Agent for basic client identification
-        const ip = req.socket.remoteAddress || 'unknown';
-        const userAgent = req.headers['user-agent'] || 'unknown';
-        return `${ip}:${userAgent}`;
     }
 
     generatePendingConnectionKey(): string {
@@ -825,9 +883,16 @@ export type WebSocketEndpointConfig = {
      * Default `1_048_576` (1 MiB); `0` removes the limit.
      */
     maxPayload?: number;
+    /**
+     * Max connection attempts per client per window. Clients are told apart by IP address (see
+     * {@link clientAddress}; IPv6 addresses share a limit per /64), or by `key` when given.
+     */
     rateLimit?: {
         max: number;
-        window: number; // in milliseconds
+        /** Window length in ms. */
+        window: number;
+        /** Identifies the client a request counts against. Return `undefined` to exempt a request. */
+        key?: (req: IncomingMessage) => string | undefined;
     };
 } & GenericWebSocketEndpointConfig;
 
