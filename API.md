@@ -128,12 +128,12 @@ Same as `shutdown()` with the default timeout. Returns its promise.
 
 | Option                  | Type                                             | Default   | Description                                                                 |
 |--------------------------|--------------------------------------------------|-----------|-------------------------------------------------------------------------------|
-| `authHandler`            | `(req) => boolean \| Promise<boolean>`           | allow all | Called before a connection is accepted; returning `false` closes it (`1008`). |
+| `authHandler`            | `(req) => boolean \| Promise<boolean>`           | allow all | Called before the handshake; returning `false` answers HTTP `401`. See [Connection checks](#connection-checks). |
 | `allowedOrigins`         | `'same-origin' \| '*' \| string[] \| (origin, req) => boolean \| Promise<boolean>` | `'same-origin'` | Browser origins allowed to connect; others get HTTP `403` before the handshake. See [Origin check](#origin-check). |
-| `limit`                  | `number`                                         | unlimited | Max simultaneous connections; excess connections are closed (`1013`).        |
+| `limit`                  | `number`                                         | unlimited | Max simultaneous connections; further upgrades get HTTP `503`.                |
 | `useConnectionKeys`      | `boolean`                                        | `true`    | Require a one-time `?key=` query param minted by `.new`.                     |
 | `pendingKeyExpiration`   | `number` (ms)                                    | `120_000` | TTL for an unused connection key.                                            |
-| `requiredParams`         | `string[]`                                       | `[]`      | Query params that must be present or the connection is closed (`1008`).      |
+| `requiredParams`         | `string[]`                                       | `[]`      | Query params that must be present, otherwise HTTP `400`.                      |
 | `timeout`                | `number` (ms)                                    | disabled  | Idle timeout; reset on client `message`/`ping` (not on heartbeat pongs). Closes with `1001` on expiry. |
 | `heartbeat`              | `number` (ms) | `false`                         | `30_000`  | Ping interval; connections that don't answer by the next ping are terminated (`1006`). See [Heartbeat](#heartbeat). |
 | `maxPayload`             | `number` (bytes)                                 | `1_048_576` | Largest message a client may send; bigger messages close the connection with `1009`. `0` removes the limit. |
@@ -159,10 +159,36 @@ connection with `1009` (Message Too Big) and emits `error` on the controller (or
 listens). `ws` allows up to 100 MiB per message by default, which lets one client make the server buffer
 that much memory per connection. Raise the limit for endpoints that receive large uploads.
 
+### Connection checks
+
+Every check runs on the upgrade request, before the WebSocket handshake, and a failed check is answered
+with a plain HTTP response. A rejected client never gets a socket, never reaches `beforeUpgrade` or the
+`connect` event, and costs the server no WebSocket state. In order:
+
+| Check                       | Response                                                   |
+|-----------------------------|-------------------------------------------------------------|
+| `rateLimit`                 | `429 Too Many Requests` with `Retry-After` (seconds)        |
+| `allowedOrigins`            | `403 Forbidden` — `Origin not allowed`                      |
+| `limit`                     | `503 Service Unavailable` — `Too many connections`          |
+| connection key              | `403 Forbidden` — `Invalid or expired connection key`       |
+| `requiredParams`            | `400 Bad Request` — `Missing required parameter: <name>`    |
+| `authHandler`               | `401 Unauthorized` — `Authentication failed`                 |
+| `authHandler` throws        | `500 Internal Server Error` (the error is reported)         |
+| `beforeUpgrade` `decline()` | the status you pass (default `400`)                          |
+
+The response body is the reason text. Non-browser clients (`ws`, curl) can read the status; browsers
+can't, and report any refused handshake as an `error` event followed by close code `1006`. See
+[Reconnect](#reconnect) for what that means for the `<WebSocket>` component.
+
+`controller.authorize(req)` runs the same checks and resolves the rejection (or `undefined`), for custom
+servers that want to reject before upgrading themselves. Sockets upgraded by your own code and passed to
+`controller.add(ws, req)` without `authorize` are still checked, and closed with the matching
+[`WebSocketError`](#websocketerror) code when rejected.
+
 ### Rate limiting
 
-`rateLimit` counts connection attempts per client and closes the ones over `max` per `window` ms with
-`1013` (emitting `rateLimit`). Clients are told apart by IP address, resolved like adapter-node's
+`rateLimit` counts connection attempts per client and answers the ones over `max` per `window` ms with
+HTTP `429` and a `Retry-After` header (emitting `rateLimit`). Clients are told apart by IP address, resolved like adapter-node's
 `getClientAddress()`:
 
 - By default, the TCP peer address. Behind a reverse proxy that is the proxy, so every user would share one
@@ -198,7 +224,7 @@ Requests without an `Origin` header are always allowed: browsers send one on eve
 only non-browser clients omit it, and those don't carry a visitor's cookies. `Origin: null` (sandboxed
 iframes, `file://`) only passes with `'*'` or a function.
 
-The check runs before `beforeUpgrade`. `raw()` endpoints aren't checked.
+The check runs before `beforeUpgrade`, after the rate limit. `raw()` endpoints aren't checked.
 
 ```ts
 websockets.continuous('/chat', {allowedOrigins: ['https://app.example.com', 'https://admin.example.com']});
@@ -224,7 +250,11 @@ Returned by `continuous()`/`use()`. Extends `EventEmitter` and implements `Gener
 
 - `path: string` — the registered route pathname.
 - `config: WebSocketEndpointConfig` — the effective (merged-with-defaults) config.
-- `beforeUpgrade?: UpgradeHandler` — set this to intercept the raw upgrade before a socket is created; call
+- `authorize(req): Promise<UpgradeRejection | undefined>` — runs the [connection checks](#connection-checks)
+  on an upgrade request. Consumes a valid connection key and counts against the rate limit.
+- `add(ws, req): Promise<boolean>` — registers an upgraded socket; checks it first unless `authorize`
+  already passed for `req`.
+- `beforeUpgrade?: UpgradeHandler` — runs after the connection checks pass, before a socket is created; call
   `accept()` or `decline(reason, code?)`. Defaults to auto-accept. `decline` answers with an HTTP response:
   `code` is the HTTP status (`400`–`599`, default `400`; anything else is sent as `400`) and `reason` is the
   response body.
@@ -260,7 +290,8 @@ methods, etc.) are available as normal.
 
 ## `WebSocketError`
 
-Close codes used internally. A plain `as const` object (not an enum), since several names share a code;
+Close codes for sockets rejected after the handshake (sockets passed to `add()` without `authorize()`)
+and for idle timeouts. A plain `as const` object (not an enum), since several names share a code;
 `WebSocketError` is also the type of its values.
 
 | Name                   | Code   |
@@ -269,6 +300,7 @@ Close codes used internally. A plain `as const` object (not an enum), since seve
 | `INVALID_KEY`          | `1008` |
 | `MISSING_PARAM`        | `1008` |
 | `AUTH_FAILED`          | `1008` |
+| `ORIGIN_NOT_ALLOWED`   | `1008` |
 | `TIMEOUT`              | `1001` |
 | `RATE_LIMITED`         | `1013` |
 
@@ -350,9 +382,14 @@ The wait before attempt `n` is `min(delay * factor^(n-1), maxDelay)`, randomized
 that so many clients don't reconnect at the same moment after a server restart.
 
 Reconnects happen after the connection drops and after a failed action request. By default a close with
-code `1000`/`1005` (the server closed normally) or `1008` (policy violation: failed auth, invalid key,
-missing parameter) doesn't reconnect, since retrying wouldn't help; `defaultShouldReconnect` is exported if
+code `1000`/`1005` (the server closed normally) or `1008` (policy violation) doesn't reconnect, since
+retrying wouldn't help; `defaultShouldReconnect` is exported if
 you want to extend that rule. `close()` and unmounting never reconnect.
+
+Endpoints refuse failed [connection checks](#connection-checks) (auth, origin, rate limit) before the
+handshake, and browsers report that as close code `1006`, the same as a network failure, so it is retried.
+Set `retries` to bound that, or check authentication in the form action (with `use()`), which fails before
+any socket is opened.
 
 Action-based sockets re-run the action on every attempt, so each gets a fresh single-use connection key.
 Received messages in `data` are kept across reconnects.
@@ -399,8 +436,9 @@ to its own listener. A separate `server.ws.port` is therefore not needed.
 - Rate limits count per client IP, resolved through `ADDRESS_HEADER`/`XFF_DEPTH` behind a proxy and per
   /64 for IPv6, so a client can't get a fresh limit by changing its User-Agent or prepending
   `X-Forwarded-For` entries. See [Rate limiting](#rate-limiting).
-- `authHandler`, `requiredParams`, and `rateLimit` are all enforced before a socket is added to a
-  controller's registry — a rejected connection is closed and never tracked.
+- `rateLimit`, `allowedOrigins`, `limit`, connection keys, `requiredParams` and `authHandler` all run before
+  the WebSocket handshake; a rejected client gets an HTTP error response and never a socket. See
+  [Connection checks](#connection-checks).
 - Sockets are removed from the registry the moment they close, and the heartbeat terminates peers that
   vanished without closing, so dead connections cannot accumulate. See [Heartbeat](#heartbeat).
 - Client messages are capped at `maxPayload` (default 1 MiB) so one client can't make the server buffer
