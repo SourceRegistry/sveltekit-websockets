@@ -3,7 +3,9 @@
         Action,
         ActionSocket,
         ActionSocketError,
+        defaultShouldReconnect,
         type ActionSocketController,
+        type ReconnectOptions,
         type ActionSocketResult,
         type WebSocketEvents,
         type WebSocketProps,
@@ -14,7 +16,14 @@
 <script lang="ts" generics="T = any">
 
     import {onDestroy, onMount} from "svelte";
-    import {Action, ActionSocketError, type ActionSocketController, type WebSocketProps} from "./actions.js";
+    import {
+        Action,
+        ActionSocketError,
+        defaultShouldReconnect,
+        type ActionSocketController,
+        type ReconnectOptions,
+        type WebSocketProps
+    } from "./actions.js";
 
     let {
         onmessage,
@@ -28,12 +37,49 @@
 
     let ws = $state<WebSocket>();
     let open = $state<boolean>(false);
+    let reconnecting = $state<boolean>(false);
 
     // In-flight open(); repeated open() calls share it instead of creating a second socket.
     let opening: Promise<void> | undefined;
-    // Bumped by close(): an open() still waiting on its action must not create a socket afterwards.
+    // Bumped by close(): an open() still waiting on its action, or a scheduled reconnect, must not create a
+    // socket afterwards.
     let attempt = 0;
     let destroyed = false;
+    // Consecutive reconnect attempts since the last successful open.
+    let retries = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const reconnectOptions = (): ReconnectOptions | undefined =>
+        restProps.reconnect === true ? {} : restProps.reconnect || undefined;
+
+    const cancelReconnect = () => {
+        if (retryTimer !== undefined) clearTimeout(retryTimer);
+        retryTimer = undefined;
+        reconnecting = false;
+    };
+
+    // Schedules another attempt after a dropped connection (`ev`) or a failed action request (no `ev`).
+    const scheduleReconnect = (current: number, ev?: CloseEvent) => {
+        const options = reconnectOptions();
+        if (!options || destroyed || current !== attempt || retryTimer !== undefined) return;
+        if (ev && !(options.shouldReconnect ?? defaultShouldReconnect)(ev)) return;
+        if (retries >= (options.retries ?? Infinity)) return;
+
+        const ceiling = Math.min(
+            (options.delay ?? 1000) * (options.factor ?? 2) ** retries,
+            options.maxDelay ?? 30_000
+        );
+        // Between half and all of the ceiling, so many clients don't reconnect in lockstep.
+        const delay = ceiling / 2 + Math.random() * (ceiling / 2);
+        retries++;
+        reconnecting = true;
+        retryTimer = setTimeout(() => {
+            retryTimer = undefined;
+            reconnecting = false;
+            if (current === attempt && !destroyed) void start();
+        }, delay);
+        restProps.onreconnect?.(retries, delay);
+    };
 
     const connect = async (current: number) => {
         let url: string;
@@ -44,7 +90,10 @@
                 url = result.url;
                 protocols = result.protocols
             } catch (e) {
-                if (current === attempt) restProps.onerror?.(new ActionSocketError(e));
+                if (current === attempt) {
+                    restProps.onerror?.(new ActionSocketError(e));
+                    scheduleReconnect(current);
+                }
                 return;
             }
         } else if ('url' in restProps && restProps.url) {
@@ -67,32 +116,45 @@
         }
         socket.onopen = (event) => {
             restProps.onopen?.(event)
-            if (ws === socket) open = true;
+            if (ws === socket) {
+                open = true;
+                retries = 0;
+            }
         }
         socket.onclose = (event) => {
             restProps.onclose?.(event)
-            if (ws === socket) open = false;
+            if (ws === socket) {
+                open = false;
+                scheduleReconnect(current, event);
+            }
         }
         socket.onerror = (event) => {
             restProps.onerror?.(new ActionSocketError(event));
         }
     }
 
+    const start = (): Promise<void> => {
+        if (destroyed) return Promise.resolve();
+        if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return Promise.resolve();
+        if (!opening) {
+            const pending: Promise<void> = connect(attempt).finally(() => {
+                if (opening === pending) opening = undefined;
+            });
+            opening = pending;
+        }
+        return opening;
+    }
+
     const ctrl: ActionSocketController = {
         open() {
-            if (destroyed) return Promise.resolve();
-            if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return Promise.resolve();
-            if (!opening) {
-                const pending: Promise<void> = connect(attempt).finally(() => {
-                    if (opening === pending) opening = undefined;
-                });
-                opening = pending;
-            }
-            return opening;
+            cancelReconnect();
+            return start();
         },
         close(code?: number, reason?: string) {
             attempt++;
             opening = undefined;
+            retries = 0;
+            cancelReconnect();
             if (!ws) return
             if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) return
             ws.close(code, reason)
@@ -106,6 +168,9 @@
         get state() {
             if (!ws) return
             return ws.readyState;
+        },
+        get reconnecting() {
+            return reconnecting;
         }
     }
 

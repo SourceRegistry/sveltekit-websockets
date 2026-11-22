@@ -29,7 +29,19 @@ class FakeWebSocket {
 
     send() {
     }
+
+    simulateOpen() {
+        this.readyState = FakeWebSocket.OPEN;
+        this.onopen?.(new Event('open'));
+    }
+
+    simulateClose(code: number) {
+        this.readyState = FakeWebSocket.CLOSED;
+        this.onclose?.(new CloseEvent('close', {code}));
+    }
 }
+
+const last = () => FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
 
 const deferred = <T>() => {
     let resolve!: (value: T) => void;
@@ -65,6 +77,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
 });
 
@@ -123,5 +137,185 @@ describe('WebSocket component', () => {
         await ctrl.open();
 
         expect(FakeWebSocket.instances).toHaveLength(2);
+    });
+});
+
+describe('WebSocket component reconnect', () => {
+    // Mount first, then fake timers, so rendering itself runs on real timers. Math.random() = 1 makes
+    // every delay the full backoff ceiling.
+    const mountWithFakeTimers = async (props: Record<string, unknown>) => {
+        const mounted = await mount(props);
+        vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
+        vi.spyOn(Math, 'random').mockReturnValue(1);
+        return mounted;
+    };
+
+    it('does not reconnect unless enabled', async () => {
+        await mountWithFakeTimers({url: 'ws://example.test/socket'});
+
+        last().simulateClose(1006);
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    it('reconnects after the connection drops', async () => {
+        const onreconnect = vi.fn();
+        const {ctrl} = await mountWithFakeTimers({url: 'ws://example.test/socket', reconnect: true, onreconnect});
+        last().simulateOpen();
+
+        last().simulateClose(1006);
+        expect(ctrl.reconnecting).toBe(true);
+        expect(onreconnect).toHaveBeenCalledWith(1, 1000);
+
+        await vi.advanceTimersByTimeAsync(999);
+        expect(FakeWebSocket.instances).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(FakeWebSocket.instances).toHaveLength(2);
+        expect(ctrl.reconnecting).toBe(false);
+    });
+
+    it('backs off exponentially up to maxDelay and resets after a successful open', async () => {
+        const delays: number[] = [];
+        await mountWithFakeTimers({
+            url: 'ws://example.test/socket',
+            reconnect: {delay: 100, factor: 3, maxDelay: 1000},
+            onreconnect: (_attempt: number, delay: number) => delays.push(delay)
+        });
+
+        for (let i = 0; i < 4; i++) {
+            last().simulateClose(1006);
+            await vi.advanceTimersByTimeAsync(1000);
+        }
+        last().simulateOpen();
+        last().simulateClose(1006);
+
+        expect(delays).toEqual([100, 300, 900, 1000, 100]);
+    });
+
+    it('jitters the delay to between half and all of the backoff', async () => {
+        const onreconnect = vi.fn();
+        await mountWithFakeTimers({url: 'ws://example.test/socket', reconnect: true, onreconnect});
+        vi.mocked(Math.random).mockReturnValue(0);
+
+        last().simulateClose(1006);
+
+        expect(onreconnect).toHaveBeenCalledWith(1, 500);
+    });
+
+    it('stops after `retries` consecutive attempts', async () => {
+        await mountWithFakeTimers({url: 'ws://example.test/socket', reconnect: {retries: 2}});
+
+        for (let i = 0; i < 4; i++) {
+            last().simulateClose(1006);
+            await vi.advanceTimersByTimeAsync(60_000);
+        }
+
+        expect(FakeWebSocket.instances).toHaveLength(3);
+    });
+
+    it.each([
+        [1000, false],
+        [1005, false],
+        [1008, false],
+        [1001, true],
+        [1006, true],
+        [1013, true],
+    ])('by default treats close code %i as reconnect = %s', async (code, reconnects) => {
+        await mountWithFakeTimers({url: 'ws://example.test/socket', reconnect: true});
+
+        last().simulateClose(code);
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(FakeWebSocket.instances).toHaveLength(reconnects ? 2 : 1);
+    });
+
+    it('lets shouldReconnect decide', async () => {
+        const shouldReconnect = vi.fn((ev: CloseEvent) => ev.code === 4000);
+        await mountWithFakeTimers({url: 'ws://example.test/socket', reconnect: {shouldReconnect}});
+
+        last().simulateClose(1006);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(FakeWebSocket.instances).toHaveLength(1);
+
+        last().simulateClose(4000);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(FakeWebSocket.instances).toHaveLength(2);
+    });
+
+    it('does not reconnect after close()', async () => {
+        const {ctrl} = await mountWithFakeTimers({url: 'ws://example.test/socket', reconnect: true});
+        const socket = last();
+        socket.simulateOpen();
+
+        ctrl.close();
+        socket.simulateClose(1006);
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    it('close() cancels a scheduled reconnect', async () => {
+        const {ctrl} = await mountWithFakeTimers({url: 'ws://example.test/socket', reconnect: true});
+
+        last().simulateClose(1006);
+        expect(ctrl.reconnecting).toBe(true);
+        ctrl.close();
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(ctrl.reconnecting).toBe(false);
+        expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    it('open() connects right away instead of waiting for the scheduled reconnect', async () => {
+        const {ctrl} = await mountWithFakeTimers({url: 'ws://example.test/socket', reconnect: true});
+
+        last().simulateClose(1006);
+        await ctrl.open();
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(ctrl.reconnecting).toBe(false);
+        expect(FakeWebSocket.instances).toHaveLength(2);
+    });
+
+    it('does not reconnect after unmount', async () => {
+        const {unmount} = await mountWithFakeTimers({url: 'ws://example.test/socket', reconnect: true});
+
+        last().simulateClose(1006);
+        await unmount();
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    it('re-runs the action on every attempt', async () => {
+        let n = 0;
+        const fetch = vi.fn(async () => actionResponse(`ws://example.test/${++n}`));
+        vi.stubGlobal('fetch', fetch);
+
+        await mountWithFakeTimers({action: '?/ws', reconnect: true});
+        await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+
+        last().simulateClose(1006);
+        await vi.advanceTimersByTimeAsync(1000);
+        await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+
+        expect(fetch).toHaveBeenCalledTimes(2);
+        expect(FakeWebSocket.instances.map((ws) => ws.url)).toEqual(['ws://example.test/1', 'ws://example.test/2']);
+    });
+
+    it('retries a failed action request', async () => {
+        const onerror = vi.fn();
+        const fetch = vi.fn()
+            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockImplementation(async () => actionResponse('ws://example.test/a'));
+        vi.stubGlobal('fetch', fetch);
+
+        await mountWithFakeTimers({action: '?/ws', reconnect: true, onerror});
+        await vi.waitFor(() => expect(onerror).toHaveBeenCalledTimes(1));
+
+        await vi.advanceTimersByTimeAsync(1000);
+        await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+        expect(fetch).toHaveBeenCalledTimes(2);
     });
 });

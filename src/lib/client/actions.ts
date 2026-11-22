@@ -8,18 +8,50 @@ export type ActionSocketResult = {
 }
 
 export type ActionSocketController = {
+    /** Connects (re-running the action, if any). Cancels a scheduled reconnect. */
     open(): Promise<void>,
+    /** Closes the socket and cancels any pending connect or scheduled reconnect. */
     close(code?: number, reason?: string): void,
     get websocket(): WebSocket | undefined,
     get isOpen(): boolean,
-    get state(): number | undefined
+    get state(): number | undefined,
+    /** `true` while a reconnect is scheduled. */
+    get reconnecting(): boolean
 }
+
+/**
+ * Automatic reconnection after the connection drops or the action request fails. The wait before attempt
+ * `n` (1-based) is `min(delay * factor^(n-1), maxDelay)`, randomized to between half and all of that so
+ * many clients don't reconnect in lockstep. The attempt count resets once a connection opens.
+ * Action-based sockets re-run the action on every attempt, so each gets a fresh connection key.
+ */
+export type ReconnectOptions = {
+    /** Maximum consecutive attempts. Default: unlimited. */
+    retries?: number,
+    /** Base delay in ms. Default `1000`. */
+    delay?: number,
+    /** Upper bound for the delay in ms. Default `30000`. */
+    maxDelay?: number,
+    /** Backoff multiplier. Default `2`. */
+    factor?: number,
+    /**
+     * Whether to reconnect after this close. Default: reconnect unless the server closed normally (`1000`,
+     * `1005`) or for a policy violation (`1008`: failed auth, invalid key, missing parameter), which a retry
+     * wouldn't fix. Never called after `close()` or unmount, which don't reconnect.
+     */
+    shouldReconnect?: (ev: CloseEvent) => boolean,
+}
+
+export const defaultShouldReconnect = (ev: CloseEvent): boolean =>
+    ev.code !== 1000 && ev.code !== 1005 && ev.code !== 1008;
 
 export type WebSocketEvents<T = any> = {
     onmessage?: (ev: MessageEvent<T>) => unknown,
     onopen?: (ev: Event) => unknown,
     onclose?: (ev: CloseEvent) => unknown,
     onerror?: (reason?: Event) => unknown,
+    /** A reconnect was scheduled: `attempt` is 1-based, `delay` in ms. */
+    onreconnect?: (attempt: number, delay: number) => unknown,
 }
 
 export type WebSocketSnippets<T = any> = {
@@ -41,7 +73,13 @@ export type WebSocketProps<T = any> =
         devalue?: boolean,
         init?: RequestInit
     }) &
-    { auto_open?: boolean, data?: T[], binaryType?: BinaryType } &
+    {
+        auto_open?: boolean,
+        data?: T[],
+        binaryType?: BinaryType,
+        /** Reconnect automatically; `true` uses the defaults of {@link ReconnectOptions}. Default `false`. */
+        reconnect?: boolean | ReconnectOptions
+    } &
     WebSocketSnippets<T> &
     WebSocketEvents<T>
 
