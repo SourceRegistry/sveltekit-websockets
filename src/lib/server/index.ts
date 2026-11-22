@@ -291,11 +291,23 @@ export const WebSocketError = {
     INVALID_KEY: 1008,
     MISSING_PARAM: 1008,
     AUTH_FAILED: 1008,
+    ORIGIN_NOT_ALLOWED: 1008,
     TIMEOUT: 1001,
     RATE_LIMITED: 1013
 } as const;
 
 export type WebSocketError = typeof WebSocketError[keyof typeof WebSocketError];
+
+/**
+ * Why an upgrade was refused. Before the handshake it is sent as an HTTP response (`status`, `reason` as
+ * body, `headers`); on a socket that is already open it becomes a close frame (`code`, `reason`).
+ */
+export type UpgradeRejection = {
+    status: number;
+    code: number;
+    reason: string;
+    headers?: Record<string, string>;
+};
 
 export type UpgradeHandler = (input: {
     req: IncomingMessage,
@@ -338,6 +350,8 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
     private sockets = new Map<string, ReferencedWebSocket>();
     private pendingKeys = new Map<string, PendingKey>();
     private rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+    // Requests that passed authorize() before their handshake, so add() doesn't check (and count) them again.
+    private authorized = new WeakSet<IncomingMessage>();
     private cleanupTimer?: NodeJS.Timeout;
     private heartbeatTimer?: NodeJS.Timeout;
     // Sockets pinged by the last heartbeat that haven't shown any sign of life since.
@@ -416,12 +430,13 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
         }
     }
 
-    private checkRateLimit(req: IncomingMessage): boolean {
-        if (!this.config.rateLimit) return true;
+    /** Counts an attempt; returns the ms until the client may try again when it is over the limit. */
+    private rateLimited(req: IncomingMessage): number | undefined {
+        if (!this.config.rateLimit) return undefined;
 
         const clientId = this.config.rateLimit.key ? this.config.rateLimit.key(req) : rateLimitKey(clientAddress(req));
         // A custom key may exempt a request by returning undefined.
-        if (clientId === undefined) return true;
+        if (clientId === undefined) return undefined;
         const now = Date.now();
         const limit = this.rateLimitMap.get(clientId);
 
@@ -430,16 +445,16 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
                 count: 1,
                 resetTime: now + this.config.rateLimit.window
             });
-            return true;
+            return undefined;
         }
 
         if (limit.count >= this.config.rateLimit.max) {
             this.emit('rateLimit', req);
-            return false;
+            return limit.resetTime - now;
         }
 
         limit.count++;
-        return true;
+        return undefined;
     }
 
     generatePendingConnectionKey(): string {
@@ -470,49 +485,80 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
     }
 
     /**
-     * Validates and registers an upgraded socket. Resolves `true` when the socket was accepted, `false`
-     * when it was rejected (and closed).
+     * Runs every connection check on an upgrade request, in order: rate limit, `allowedOrigins`, `limit`,
+     * connection key, `requiredParams`, `authHandler`. Resolves `undefined` when the request may connect,
+     * otherwise why not. A valid connection key is consumed and the attempt counts against the rate limit.
+     *
+     * `WebSockets.upgrade` calls this before the handshake and answers a rejection with an HTTP response;
+     * {@link add} then skips the checks for that request.
+     */
+    async authorize(req: IncomingMessage): Promise<UpgradeRejection | undefined> {
+        try {
+            const retryAfter = this.rateLimited(req);
+            if (retryAfter !== undefined) {
+                return {
+                    status: 429,
+                    code: WebSocketError.RATE_LIMITED,
+                    reason: 'Rate limit exceeded',
+                    headers: {'Retry-After': String(Math.max(1, Math.ceil(retryAfter / 1000)))}
+                };
+            }
+
+            if (!await this.isOriginAllowed(req)) {
+                return {status: 403, code: WebSocketError.ORIGIN_NOT_ALLOWED, reason: 'Origin not allowed'};
+            }
+
+            if (this.config.limit && this.sockets.size >= this.config.limit) {
+                return {status: 503, code: WebSocketError.TOO_MANY_CONNECTIONS, reason: 'Too many connections'};
+            }
+
+            const params = parseUrl(req).searchParams;
+
+            if (this.config.useConnectionKeys && !this.validateConnectionKey(params.get('key') || '')) {
+                return {status: 403, code: WebSocketError.INVALID_KEY, reason: 'Invalid or expired connection key'};
+            }
+
+            for (const param of this.config.requiredParams ?? []) {
+                if (!params.has(param)) {
+                    return {status: 400, code: WebSocketError.MISSING_PARAM, reason: `Missing required parameter: ${param}`};
+                }
+            }
+
+            if (!await this.authHandler(req)) {
+                return {status: 401, code: WebSocketError.AUTH_FAILED, reason: 'Authentication failed'};
+            }
+        } catch (error) {
+            this.reportError(error);
+            return {status: 500, code: 1011, reason: 'Internal server error'};
+        }
+
+        this.authorized.add(req);
+        return undefined;
+    }
+
+    /**
+     * Registers an upgraded socket. Requests that didn't go through {@link authorize} first (e.g. sockets
+     * upgraded by your own server code) are checked here and closed on rejection. Resolves `true` when the
+     * socket was accepted, `false` when it was rejected (and closed).
      */
     async add(ws: ReferencedWebSocket, req: IncomingMessage): Promise<boolean> {
         try {
-            // Rate limiting check
-            if (!this.checkRateLimit(req)) {
-                ws.close(WebSocketError.RATE_LIMITED, 'Rate limit exceeded');
-                return false;
+            if (!this.authorized.has(req)) {
+                const rejection = await this.authorize(req);
+                if (rejection) {
+                    ws.close(rejection.code, rejection.reason);
+                    return false;
+                }
             }
+            this.authorized.delete(req);
 
-            // Connection limit check
-            if (this.config?.limit && this.sockets.size >= this.config.limit) {
+            // Other connections may have been accepted while this one was upgrading.
+            if (this.config.limit && this.sockets.size >= this.config.limit) {
                 ws.close(WebSocketError.TOO_MANY_CONNECTIONS, 'Too many connections');
                 return false;
             }
 
-            const params = parseUrl(req)?.searchParams;
-
-            // Key validation
-            if (this.config.useConnectionKeys) {
-                const providedKey = params.get('key');
-                if (!this.validateConnectionKey(providedKey || '')) {
-                    ws.close(WebSocketError.INVALID_KEY, 'Invalid or expired connection key');
-                    return false;
-                }
-            }
-
-            // Required parameters check
-            if (this.config.requiredParams) {
-                for (const param of this.config.requiredParams) {
-                    if (!params.has(param)) {
-                        ws.close(WebSocketError.MISSING_PARAM, `Missing required parameter: ${param}`);
-                        return false;
-                    }
-                }
-            }
-
-            // Authentication
-            if (!await this.authHandler(req)) {
-                ws.close(WebSocketError.AUTH_FAILED, 'Authentication failed');
-                return false;
-            }
+            const params = parseUrl(req).searchParams;
 
             // Store parameters and add socket
             ws.params = Object.fromEntries(params.entries());
@@ -1074,7 +1120,7 @@ function routePath(route: string | RequestEventLike | URL): string {
  * Rejects an upgrade request with a plain HTTP response. `code` must be an HTTP error status (`400`–`599`);
  * anything else (such as a WebSocket close code) is sent as `400`.
  */
-function rejectUpgrade(socket: Duplex, code: number, reason: string) {
+function rejectUpgrade(socket: Duplex, code: number, reason: string, headers: Record<string, string> = {}) {
     const status = Number.isInteger(code) && code >= 400 && code <= 599 ? code : 400;
     // The reason becomes the response body; strip line breaks so it can't inject headers.
     const body = String(reason ?? '').replace(/[\r\n]+/g, ' ');
@@ -1087,6 +1133,7 @@ function rejectUpgrade(socket: Duplex, code: number, reason: string) {
         `HTTP/1.1 ${status} ${STATUS_CODES[status] ?? 'Error'}\r\n` +
         'Connection: close\r\n' +
         'Content-Type: text/plain; charset=utf-8\r\n' +
+        Object.entries(headers).map(([name, value]) => `${name}: ${String(value).replace(/[\r\n]+/g, ' ')}\r\n`).join('') +
         `Content-Length: ${Buffer.byteLength(body)}\r\n` +
         '\r\n' +
         body
@@ -1209,6 +1256,15 @@ export const WebSockets = {
     },
 
     async upgrade(req: IncomingMessage, socket: Duplex, head: Buffer) {
+        // Node drops its own 'error' listener from an upgraded socket. Without one, a client resetting the
+        // connection while an async check (authHandler, beforeUpgrade) is pending would crash the process.
+        // Removed again once `ws` takes the socket over, since it installs its own.
+        const onSocketError = () => socket.destroy();
+        socket.on('error', onSocketError);
+        const handOver = () => socket.off('error', onSocketError);
+        // The client went away while a check was pending.
+        const gone = () => socket.destroyed || !socket.writable;
+
         try {
             const url = parseUrl(req);
             const controller = allowed_routes.get(url.pathname);
@@ -1217,8 +1273,9 @@ export const WebSockets = {
                 return;
             }
             if (controller instanceof WebSocketEndpointController) {
-                if (!await controller.isOriginAllowed(req)) {
-                    rejectUpgrade(socket, 403, 'Origin not allowed');
+                const rejection = await controller.authorize(req);
+                if (rejection) {
+                    rejectUpgrade(socket, rejection.status, rejection.reason, rejection.headers);
                     return;
                 }
                 if (!controller.beforeUpgrade) {
@@ -1226,27 +1283,44 @@ export const WebSockets = {
                 }
                 await controller.beforeUpgrade({
                     req, head,
-                    accept: () => serverFor(controller.config.maxPayload)
-                        .handleUpgrade(req, socket, head, (ws, req) => controller.add(ws, req)),
+                    accept: () => {
+                        if (gone()) {
+                            socket.destroy();
+                            return;
+                        }
+                        handOver();
+                        serverFor(controller.config.maxPayload)
+                            .handleUpgrade(req, socket, head, (ws, req) => controller.add(ws, req));
+                    },
                     decline: (reason, code = 400) => rejectUpgrade(socket, code, reason)
                 });
             } else if (controller instanceof WebSocketRequestEndpointController) {
                 const endpoint = controller.claim(url.searchParams.get('key'));
-                if (endpoint && !await endpoint.isOriginAllowed(req)) {
-                    endpoint.destroy();
-                    rejectUpgrade(socket, 403, 'Origin not allowed');
+                if (!endpoint) {
+                    rejectUpgrade(socket, 403, 'Invalid or expired connection key');
                     return;
                 }
-                serverFor(endpoint?.config.maxPayload).handleUpgrade(req, socket, head, async (ws, req) => {
-                    if (!endpoint) {
-                        ws.close(WebSocketError.INVALID_KEY, 'Invalid or expired connection key');
-                        return;
-                    }
+                const rejection = await endpoint.authorize(req);
+                if (rejection || gone()) {
+                    endpoint.destroy();
+                    if (rejection) rejectUpgrade(socket, rejection.status, rejection.reason, rejection.headers);
+                    else socket.destroy();
+                    return;
+                }
+                // Release the endpoint if the client goes away before the handshake completes.
+                let upgraded = false;
+                socket.once('close', () => {
+                    if (!upgraded) endpoint.destroy();
+                });
+                handOver();
+                serverFor(endpoint.config.maxPayload).handleUpgrade(req, socket, head, async (ws, req) => {
+                    upgraded = true;
                     if (!await endpoint.add(ws, req)) {
                         endpoint.destroy();
                     }
                 });
             } else if (controller instanceof WebSocketRawEndpointController) {
+                handOver();
                 await controller.handle(req, socket, head);
             }
         } catch (error) {

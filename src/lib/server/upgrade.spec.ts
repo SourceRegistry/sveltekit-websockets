@@ -1,8 +1,8 @@
 import {createServer, type Server} from 'node:http';
 import type {AddressInfo} from 'node:net';
 import {afterAll, afterEach, beforeAll, describe, expect, it, vi} from 'vitest';
-import {WebSocket as WsClient} from 'ws';
-import {clientAddress, WebSocketError, WebSockets} from './index.js';
+import {WebSocket as WsClient, WebSocketServer} from 'ws';
+import {clientAddress, ReferencedWebSocket, WebSocketError, WebSockets} from './index.js';
 import type {IncomingMessage} from 'node:http';
 
 let httpServer: Server;
@@ -88,8 +88,7 @@ describe('use()', () => {
         const first = connect(url);
         expect(await first.firstMessage).toBe('hi');
 
-        const second = connect(url);
-        expect((await second.closed).code).toBe(WebSocketError.INVALID_KEY);
+        expect(await rejection(url)).toEqual({status: 403, body: 'Invalid or expired connection key'});
 
         first.ws.close();
         expect(keep).toContain('?key=');
@@ -102,8 +101,7 @@ describe('use()', () => {
 
         await sleep(60);
 
-        const client = connect(expired);
-        expect((await client.closed).code).toBe(WebSocketError.INVALID_KEY);
+        expect((await rejection(expired)).status).toBe(403);
         expect(handler).not.toHaveBeenCalled();
     });
 
@@ -122,8 +120,7 @@ describe('use()', () => {
         const handler = vi.fn();
         const url = WebSockets.use('/rejected', handler, {authHandler: () => false});
 
-        const client = connect(url);
-        expect((await client.closed).code).toBe(WebSocketError.AUTH_FAILED);
+        expect(await rejection(url)).toEqual({status: 401, body: 'Authentication failed'});
         expect(handler).not.toHaveBeenCalled();
         expect(() => WebSockets.continuous('/rejected')).not.toThrow();
     });
@@ -225,6 +222,7 @@ describe('WebSocketError', () => {
             INVALID_KEY: 1008,
             MISSING_PARAM: 1008,
             AUTH_FAILED: 1008,
+            ORIGIN_NOT_ALLOWED: 1008,
             TIMEOUT: 1001,
             RATE_LIMITED: 1013
         });
@@ -521,11 +519,18 @@ describe('clientAddress()', () => {
 });
 
 describe('rateLimit', () => {
+    // Resolves 'open' when the handshake succeeds, otherwise the HTTP status of the rejection.
     const attempt = (path: string, headers: Record<string, string> = {}) => new Promise<'open' | number>((resolve) => {
         const ws = new WsClient(`ws://127.0.0.1:${port}${path}`, {headers});
         ws.on('error', () => {});
-        ws.on('close', (code) => resolve(code === WebSocketError.RATE_LIMITED ? code : 'open'));
-        ws.on('open', () => setTimeout(() => ws.close(), 20));
+        ws.on('open', () => {
+            resolve('open');
+            ws.close();
+        });
+        ws.on('unexpected-response', (req, res) => {
+            resolve(res.statusCode ?? 0);
+            req.destroy();
+        });
     });
 
     afterEach(() => {
@@ -538,7 +543,7 @@ describe('rateLimit', () => {
         const results = [];
         for (const agent of ['a', 'b', 'c']) results.push(await attempt('/rl-ua', {'user-agent': agent}));
 
-        expect(results).toEqual(['open', 'open', WebSocketError.RATE_LIMITED]);
+        expect(results).toEqual(['open', 'open', 429]);
     });
 
     it('limits each client behind a proxy separately', async () => {
@@ -547,9 +552,9 @@ describe('rateLimit', () => {
 
         expect(await attempt('/rl-proxy', {'x-forwarded-for': '203.0.113.1'})).toBe('open');
         expect(await attempt('/rl-proxy', {'x-forwarded-for': '203.0.113.2'})).toBe('open');
-        expect(await attempt('/rl-proxy', {'x-forwarded-for': '203.0.113.1'})).toBe(WebSocketError.RATE_LIMITED);
+        expect(await attempt('/rl-proxy', {'x-forwarded-for': '203.0.113.1'})).toBe(429);
         // A spoofed entry prepended by the client doesn't give it a fresh limit.
-        expect(await attempt('/rl-proxy', {'x-forwarded-for': '1.1.1.1, 203.0.113.1'})).toBe(WebSocketError.RATE_LIMITED);
+        expect(await attempt('/rl-proxy', {'x-forwarded-for': '1.1.1.1, 203.0.113.1'})).toBe(429);
     });
 
     it('shares one limit across an IPv6 /64', async () => {
@@ -557,7 +562,7 @@ describe('rateLimit', () => {
         WebSockets.continuous('/rl-ipv6', {useConnectionKeys: false, rateLimit: {max: 1, window: 60_000}});
 
         expect(await attempt('/rl-ipv6', {'x-real-ip': '2001:db8:0:1::1'})).toBe('open');
-        expect(await attempt('/rl-ipv6', {'x-real-ip': '2001:db8:0:1:ffff::2'})).toBe(WebSocketError.RATE_LIMITED);
+        expect(await attempt('/rl-ipv6', {'x-real-ip': '2001:db8:0:1:ffff::2'})).toBe(429);
         expect(await attempt('/rl-ipv6', {'x-real-ip': '2001:db8:0:2::1'})).toBe('open');
     });
 
@@ -573,8 +578,163 @@ describe('rateLimit', () => {
 
         expect(await attempt('/rl-key', {'x-user': 'alice'})).toBe('open');
         expect(await attempt('/rl-key', {'x-user': 'bob'})).toBe('open');
-        expect(await attempt('/rl-key', {'x-user': 'alice'})).toBe(WebSocketError.RATE_LIMITED);
+        expect(await attempt('/rl-key', {'x-user': 'alice'})).toBe(429);
         expect(await attempt('/rl-key', {'x-user': 'admin'})).toBe('open');
         expect(await attempt('/rl-key', {'x-user': 'admin'})).toBe('open');
+    });
+});
+
+describe('checks before the handshake', () => {
+    // Resolves with the handshake outcome: 101 on success, otherwise the HTTP rejection.
+    const respond = (path: string, headers: Record<string, string> = {}) =>
+        new Promise<{ status: number, headers: Record<string, unknown>, body: string, ws?: WsClient }>((resolve) => {
+            const ws = new WsClient(`ws://127.0.0.1:${port}${path}`, {headers});
+            ws.on('error', () => {});
+            ws.on('open', () => resolve({status: 101, headers: {}, body: '', ws}));
+            ws.on('unexpected-response', (req, res) => {
+                let body = '';
+                res.on('data', (chunk) => body += chunk);
+                res.on('end', () => {
+                    resolve({status: res.statusCode ?? 0, headers: res.headers, body});
+                    req.destroy();
+                });
+            });
+        });
+
+    it('answers a rate-limited attempt with 429 and Retry-After', async () => {
+        WebSockets.continuous('/pre-rate', {useConnectionKeys: false, rateLimit: {max: 1, window: 10_000}});
+
+        const first = await respond('/pre-rate');
+        const second = await respond('/pre-rate');
+
+        expect(first.status).toBe(101);
+        expect(second).toMatchObject({status: 429, body: 'Rate limit exceeded'});
+        expect(Number(second.headers['retry-after'])).toBeGreaterThanOrEqual(9);
+        expect(Number(second.headers['retry-after'])).toBeLessThanOrEqual(10);
+        first.ws?.close();
+    });
+
+    it('answers a full endpoint with 503', async () => {
+        WebSockets.continuous('/pre-full', {useConnectionKeys: false, limit: 1});
+
+        const first = await respond('/pre-full');
+        expect(first.status).toBe(101);
+        expect(await respond('/pre-full')).toMatchObject({status: 503, body: 'Too many connections'});
+        first.ws?.close();
+    });
+
+    it('answers a missing or wrong connection key with 403', async () => {
+        const chat = WebSockets.continuous('/pre-key');
+
+        expect((await respond('/pre-key')).status).toBe(403);
+        expect((await respond('/pre-key?key=nope')).status).toBe(403);
+        const ok = await respond(chat.new);
+        expect(ok.status).toBe(101);
+        ok.ws?.close();
+    });
+
+    it('answers a missing required parameter with 400', async () => {
+        WebSockets.continuous('/pre-param', {useConnectionKeys: false, requiredParams: ['room']});
+
+        expect(await respond('/pre-param')).toMatchObject({status: 400, body: 'Missing required parameter: room'});
+        const ok = await respond('/pre-param?room=1');
+        expect(ok.status).toBe(101);
+        ok.ws?.close();
+    });
+
+    it('answers a failed authHandler with 401 without ever upgrading', async () => {
+        const chat = WebSockets.continuous('/pre-auth', {
+            useConnectionKeys: false,
+            authHandler: async (req) => req.headers.authorization === 'Bearer ok'
+        });
+        const onConnect = vi.fn();
+        const beforeUpgrade = vi.fn(({accept}) => accept());
+        chat.on('connect', onConnect);
+        chat.beforeUpgrade = beforeUpgrade;
+
+        expect(await respond('/pre-auth')).toMatchObject({status: 401, body: 'Authentication failed'});
+        expect(onConnect).not.toHaveBeenCalled();
+        expect(beforeUpgrade).not.toHaveBeenCalled();
+
+        const ok = await respond('/pre-auth', {authorization: 'Bearer ok'});
+        expect(ok.status).toBe(101);
+        expect(beforeUpgrade).toHaveBeenCalledTimes(1);
+        ok.ws?.close();
+    });
+
+    it('answers a throwing authHandler with 500 and reports the error', async () => {
+        const chat = WebSockets.continuous('/pre-throw', {
+            useConnectionKeys: false,
+            authHandler: () => {
+                throw new Error('session store down');
+            }
+        });
+        const errors: Error[] = [];
+        chat.on('error', (error) => errors.push(error));
+
+        expect((await respond('/pre-throw')).status).toBe(500);
+        expect(errors.map((error) => error.message)).toEqual(['session store down']);
+    });
+
+    it('counts a request that passed the checks only once', async () => {
+        const chat = WebSockets.continuous('/pre-once', {useConnectionKeys: false, rateLimit: {max: 1, window: 60_000}});
+        chat.on('connect', (socket) => socket.send('welcome'));
+
+        const client = connect('/pre-once');
+        expect(await client.firstMessage).toBe('welcome');
+        client.ws.close();
+    });
+
+    it('releases a use() endpoint when the client leaves during an async authHandler', async () => {
+        const handler = vi.fn();
+        const url = WebSockets.use('/pre-gone', handler, {
+            authHandler: async () => {
+                await sleep(50);
+                return true;
+            }
+        });
+
+        const ws = new WsClient(`ws://127.0.0.1:${port}${url}`);
+        ws.on('error', () => {});
+        await sleep(10);
+        ws.terminate();
+        await sleep(100);
+
+        expect(handler).not.toHaveBeenCalled();
+        expect(() => WebSockets.continuous('/pre-gone')).not.toThrow();
+    });
+
+    it('still checks sockets handed to add() directly, closing rejected ones', async () => {
+        const chat = WebSockets.continuous('/direct', {
+            useConnectionKeys: false,
+            authHandler: (req) => req.headers.authorization === 'Bearer ok'
+        });
+        chat.on('connect', (socket) => socket.send('welcome'));
+
+        const wss = new WebSocketServer({noServer: true, WebSocket: ReferencedWebSocket});
+        const custom = createServer();
+        custom.on('upgrade', (req, socket, head) =>
+            wss.handleUpgrade(req, socket, head, (ws) => chat.add(ws as ReferencedWebSocket, req)));
+        await new Promise<void>((resolve) => custom.listen(0, '127.0.0.1', resolve));
+        const customPort = (custom.address() as AddressInfo).port;
+
+        const open = (headers: Record<string, string>) => {
+            const ws = new WsClient(`ws://127.0.0.1:${customPort}/direct`, {headers});
+            ws.on('error', () => {});
+            return new Promise<number | string>((resolve) => {
+                ws.once('message', (data) => {
+                    resolve(data.toString());
+                    ws.close();
+                });
+                ws.once('close', (code) => resolve(code));
+            });
+        };
+
+        try {
+            expect(await open({})).toBe(WebSocketError.AUTH_FAILED);
+            expect(await open({authorization: 'Bearer ok'})).toBe('welcome');
+        } finally {
+            await new Promise((resolve) => custom.close(resolve));
+        }
     });
 });
