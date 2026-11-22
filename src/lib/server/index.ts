@@ -8,6 +8,24 @@ import {isIPv6} from "node:net";
 import {resolveCodec, type Codec, type CodecOption} from "../codec.js";
 
 export {jsonCodec, devalueCodec, type Codec, type CodecOption} from "../codec.js";
+import {KEY_PROTOCOL_PREFIX} from "../keys.js";
+export {KEY_PROTOCOL, KEY_PROTOCOL_PREFIX, splitConnectionKey} from "../keys.js";
+
+/**
+ * The connection key of an upgrade request: from the `Sec-WebSocket-Protocol` header (where the client
+ * puts it, see {@link splitConnectionKey}), or from `?key=` when `allowQuery`.
+ */
+export function connectionKey(req: IncomingMessage, allowQuery = true): string | undefined {
+    const header = req.headers['sec-websocket-protocol'];
+    if (header) {
+        for (const protocol of header.split(',')) {
+            const value = protocol.trim();
+            if (value.startsWith(KEY_PROTOCOL_PREFIX)) return value.slice(KEY_PROTOCOL_PREFIX.length) || undefined;
+        }
+    }
+    if (!allowQuery) return undefined;
+    return parseUrl(req).searchParams.get('key') || undefined;
+}
 
 // Enhanced BufferLike type with better type safety
 export type BufferLike =
@@ -573,7 +591,8 @@ export class WebSocketEndpointController<In = unknown, Out = unknown> extends Ev
 
             const params = parseUrl(req).searchParams;
 
-            if (this.config.useConnectionKeys && !this.validateConnectionKey(params.get('key') || '')) {
+            if (this.config.useConnectionKeys
+                && !this.validateConnectionKey(connectionKey(req, this.config.allowKeyInQuery ?? true) ?? '')) {
                 return {status: 403, code: WebSocketError.INVALID_KEY, reason: 'Invalid or expired connection key'};
             }
 
@@ -1001,6 +1020,12 @@ export type WebSocketEndpointConfig = {
      */
     maxPayload?: number;
     /**
+     * Accept the connection key from the `?key=` query parameter as well as from the
+     * `Sec-WebSocket-Protocol` header the bundled client uses. Query strings end up in access logs, so turn
+     * this off once every client sends the key in the header. Default `true`.
+     */
+    allowKeyInQuery?: boolean;
+    /**
      * How `sendMessage`, `onMessage` and `broadcastMessage` encode messages. Must match the client's
      * `codec`. Default `'json'`.
      */
@@ -1220,8 +1245,20 @@ function rejectUpgrade(socket: Duplex, code: number, reason: string, headers: Re
 const allowed_routes = new Map<string, GenericWebSocketEndpointController>();
 
 // `maxPayload` is a server-level option in `ws`, so there is one (cheap, port-less) server per limit in use.
-const createServer = (maxPayload: number) =>
-    new WebSocketServer({noServer: true, clientTracking: false, maxPayload, WebSocket: ReferencedWebSocket});
+const createServer = (maxPayload: number) => new WebSocketServer({
+    noServer: true,
+    clientTracking: false,
+    maxPayload,
+    WebSocket: ReferencedWebSocket,
+    // Answer with the client's first protocol that doesn't carry a connection key, so the key is never
+    // echoed back. (A browser fails the handshake unless one of its offered protocols is selected.)
+    handleProtocols: (protocols) => {
+        for (const protocol of protocols) {
+            if (!protocol.startsWith(KEY_PROTOCOL_PREFIX)) return protocol;
+        }
+        return false;
+    },
+});
 const servers = new Map<number, ReturnType<typeof createServer>>();
 const serverFor = (maxPayload: number = DEFAULT_MAX_PAYLOAD) => {
     const limit = Number.isFinite(maxPayload) && maxPayload > 0 ? Math.floor(maxPayload) : 0;
@@ -1372,7 +1409,7 @@ export const WebSockets = {
                     decline: (reason, code = 400) => rejectUpgrade(socket, code, reason)
                 });
             } else if (controller instanceof WebSocketRequestEndpointController) {
-                const endpoint = controller.claim(url.searchParams.get('key'));
+                const endpoint = controller.claim(connectionKey(req) ?? null);
                 if (!endpoint) {
                     rejectUpgrade(socket, 403, 'Invalid or expired connection key');
                     return;

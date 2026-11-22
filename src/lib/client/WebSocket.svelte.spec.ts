@@ -465,3 +465,29 @@ describe('WebSocket component codec', () => {
         expect(last().sent).toEqual(['plain']);
     });
 });
+
+describe('WebSocket component connection keys', () => {
+    it('sends a url key in the subprotocols instead of the URL', async () => {
+        await mount({url: 'ws://example.test/chat?room=1&key=secret', protocols: ['mine']});
+
+        expect(last().url).toBe('ws://example.test/chat?room=1');
+        expect(last().protocols).toEqual(['mine', 'sveltekit-websockets', 'sveltekit-websockets.key.secret']);
+    });
+
+    it('does the same for the URL an action returns', async () => {
+        vi.stubGlobal('fetch', vi.fn(async () => actionResponse('ws://example.test/chat?key=from-action')));
+
+        await mount({action: '?/ws'});
+        await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+
+        expect(last().url).toBe('ws://example.test/chat');
+        expect(last().protocols).toEqual(['sveltekit-websockets', 'sveltekit-websockets.key.from-action']);
+    });
+
+    it('leaves URLs without a key alone', async () => {
+        await mount({url: 'ws://example.test/chat'});
+
+        expect(last().url).toBe('ws://example.test/chat');
+        expect(last().protocols).toEqual([]);
+    });
+});

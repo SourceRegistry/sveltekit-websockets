@@ -3,6 +3,14 @@ import type { Snippet } from "svelte";
 import type { CodecOption } from "../codec.js";
 
 export { jsonCodec, devalueCodec, type Codec, type CodecOption } from "../codec.js";
+import { splitConnectionKey } from "../keys.js";
+export { splitConnectionKey, KEY_PROTOCOL, KEY_PROTOCOL_PREFIX } from "../keys.js";
+
+/** Opens a socket with any `?key=` moved from the URL into the subprotocols (see {@link splitConnectionKey}). */
+const openSocket = (url: string, protocols: string | string[]): WebSocket => {
+    const target = splitConnectionKey(url, protocols);
+    return new WebSocket(target.url, target.protocols);
+};
 
 export type ActionSocketResult = {
     url: string,
@@ -139,7 +147,7 @@ export const Action = async (action: string, requestInit: RequestInit = {}, deva
             url: json.url,
             protocols: json.protocols ?? [],
             open(): WebSocket {
-                return new WebSocket(json.url, json.protocols ?? [])
+                return openSocket(json.url, json.protocols ?? [])
             }
         }
     } else {
@@ -153,7 +161,7 @@ export const Action = async (action: string, requestInit: RequestInit = {}, deva
             url: data.url,
             protocols: data.protocols ?? [],
             open(): WebSocket {
-                return new WebSocket(data.url, data.protocols ?? [])
+                return openSocket(data.url, data.protocols ?? [])
             }
         }
     }

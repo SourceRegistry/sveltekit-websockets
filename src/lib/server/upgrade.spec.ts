@@ -2,7 +2,7 @@ import {createServer, type Server} from 'node:http';
 import type {AddressInfo} from 'node:net';
 import {afterAll, afterEach, beforeAll, describe, expect, it, vi} from 'vitest';
 import {WebSocket as WsClient, WebSocketServer} from 'ws';
-import {clientAddress, ReferencedWebSocket, WebSocketError, WebSockets} from './index.js';
+import {clientAddress, connectionKey, KEY_PROTOCOL, KEY_PROTOCOL_PREFIX, ReferencedWebSocket, splitConnectionKey, WebSocketError, WebSockets} from './index.js';
 import type {IncomingMessage} from 'node:http';
 
 let httpServer: Server;
@@ -905,5 +905,94 @@ describe('typed messages', () => {
         });
         // @ts-expect-error -- broadcastMessage takes ServerMessage
         expect(() => chat.broadcastMessage({nope: true})).not.toThrow();
+    });
+});
+
+describe('connection keys in the subprotocol header', () => {
+    it('splitConnectionKey moves the key out of absolute and relative URLs', () => {
+        expect(splitConnectionKey('ws://h.test/chat?key=abc')).toEqual({
+            url: 'ws://h.test/chat',
+            protocols: [KEY_PROTOCOL, `${KEY_PROTOCOL_PREFIX}abc`]
+        });
+        expect(splitConnectionKey('/chat?room=1&key=abc&x=2#top', 'mine')).toEqual({
+            url: '/chat?room=1&x=2#top',
+            protocols: ['mine', KEY_PROTOCOL, `${KEY_PROTOCOL_PREFIX}abc`]
+        });
+        expect(splitConnectionKey(new URL('wss://h.test/a?key=k'), ['p1', 'p2']).protocols)
+            .toEqual(['p1', 'p2', KEY_PROTOCOL, `${KEY_PROTOCOL_PREFIX}k`]);
+        expect(splitConnectionKey('/chat?room=1', ['p'])).toEqual({url: '/chat?room=1', protocols: ['p']});
+    });
+
+    it('connectionKey reads the header first and the query only when allowed', () => {
+        const req = (url: string, protocol?: string) =>
+            ({url, headers: {host: 'h', ...(protocol ? {'sec-websocket-protocol': protocol} : {})}}) as unknown as IncomingMessage;
+
+        expect(connectionKey(req('/a?key=q', `mine, ${KEY_PROTOCOL}, ${KEY_PROTOCOL_PREFIX}h`))).toBe('h');
+        expect(connectionKey(req('/a?key=q'))).toBe('q');
+        expect(connectionKey(req('/a?key=q'), false)).toBeUndefined();
+    });
+
+    // Connects the way the bundled client does: key in the subprotocols, recording the URL the server saw.
+    const connectSplit = async (url: string, protocols: string[] = []) => {
+        const seen: string[] = [];
+        const record = (req: IncomingMessage) => seen.push(req.url ?? '');
+        httpServer.prependListener('upgrade', record);
+        const target = splitConnectionKey(url, protocols);
+        const ws = new WsClient(`ws://127.0.0.1:${port}${target.url}`, target.protocols);
+        ws.on('error', () => {});
+        const firstMessage = new Promise<string>((resolve) => ws.once('message', (data) => resolve(data.toString())));
+        const opened = new Promise<void>((resolve) => ws.once('open', () => resolve()));
+        await Promise.race([opened, sleep(500)]);
+        httpServer.off('upgrade', record);
+        return {ws, firstMessage, seen};
+    };
+
+    it('routes a use() connection by the key in the header, with no key in the request URL', async () => {
+        const url = WebSockets.use('/proto-use', (socket) => socket.send('hi'));
+        const c = await connectSplit(url);
+
+        expect(await c.firstMessage).toBe('hi');
+        expect(c.seen).toEqual(['/proto-use']);
+        expect(c.ws.protocol).toBe(KEY_PROTOCOL);
+        c.ws.close();
+    });
+
+    it('validates a continuous() key from the header and selects the caller\'s own protocol', async () => {
+        const chat = WebSockets.continuous('/proto-continuous');
+        chat.on('connect', (socket) => socket.send(socket.protocol));
+
+        const c = await connectSplit(chat.new, ['chat.v2']);
+
+        expect(await c.firstMessage).toBe('chat.v2');
+        expect(c.ws.protocol).toBe('chat.v2');
+        expect(c.seen[0]).toBe('/proto-continuous');
+        c.ws.close();
+    });
+
+    it('never echoes the key back as the selected protocol', async () => {
+        const chat = WebSockets.continuous('/proto-only-key');
+        const key = new URL(chat.new, 'ws://x').searchParams.get('key');
+        const ws = new WsClient(`ws://127.0.0.1:${port}/proto-only-key`, [`${KEY_PROTOCOL_PREFIX}${key}`]);
+        ws.on('error', () => {});
+        const headers = await new Promise<Record<string, unknown>>((resolve) => {
+            ws.on('upgrade', (res) => resolve(res.headers));
+            ws.on('unexpected-response', (_req, res) => resolve(res.headers));
+        });
+
+        expect(headers['sec-websocket-protocol']).toBeUndefined();
+        ws.terminate();
+    });
+
+    it('rejects query keys with allowKeyInQuery: false', async () => {
+        const chat = WebSockets.continuous('/proto-strict', {allowKeyInQuery: false});
+        chat.on('connect', (socket) => socket.send('in'));
+
+        expect((await rejection(chat.new)).status).toBe(403);
+        const c = await connectSplit(chat.new);
+        expect(await c.firstMessage).toBe('in');
+        c.ws.close();
+
+        const url = WebSockets.use('/proto-strict-use', (socket) => socket.send('in'), {allowKeyInQuery: false});
+        expect((await rejection(url)).status).toBe(403);
     });
 });

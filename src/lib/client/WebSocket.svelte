@@ -6,6 +6,9 @@
         defaultShouldReconnect,
         jsonCodec,
         devalueCodec,
+        splitConnectionKey,
+        KEY_PROTOCOL,
+        KEY_PROTOCOL_PREFIX,
         type ActionSocketController,
         type Codec,
         type CodecOption,
@@ -29,6 +32,7 @@
         type WebSocketProps
     } from "./actions.js";
     import {resolveCodec} from "../codec.js";
+    import {splitConnectionKey} from "../keys.js";
 
     let {
         onmessage,
@@ -124,7 +128,9 @@
         // close() ran or the component unmounted while the action was in flight.
         if (current !== attempt || destroyed) return;
 
-        const socket = new WebSocket(url, protocols);
+        // The connection key goes in the subprotocols, not the URL, so it stays out of access logs.
+        const target = splitConnectionKey(url, protocols);
+        const socket = new WebSocket(target.url, target.protocols);
         ws = socket;
         socket.binaryType = restProps.binaryType ? restProps.binaryType : 'arraybuffer';
         socket.onmessage = (raw) => {
