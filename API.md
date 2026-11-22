@@ -134,8 +134,30 @@ Same as `shutdown()` with the default timeout. Returns its promise.
 | `useConnectionKeys`      | `boolean`                                        | `true`    | Require a one-time `?key=` query param minted by `.new`.                     |
 | `pendingKeyExpiration`   | `number` (ms)                                    | `120_000` | TTL for an unused connection key.                                            |
 | `requiredParams`         | `string[]`                                       | `[]`      | Query params that must be present or the connection is closed (`1008`).      |
-| `timeout`                | `number` (ms)                                    | disabled  | Idle timeout; reset on `message`/`ping`/`pong`. Closes with `1001` on expiry. |
+| `timeout`                | `number` (ms)                                    | disabled  | Idle timeout; reset on client `message`/`ping` (not on heartbeat pongs). Closes with `1001` on expiry. |
+| `heartbeat`              | `number` (ms) | `false`                         | `30_000`  | Ping interval; connections that don't answer by the next ping are terminated (`1006`). See [Heartbeat](#heartbeat). |
+| `maxPayload`             | `number` (bytes)                                 | `1_048_576` | Largest message a client may send; bigger messages close the connection with `1009`. `0` removes the limit. |
 | `rateLimit`              | `{max: number, window: number}`                  | disabled  | Max connection attempts per client (IP + User-Agent) per rolling window.      |
+
+### Heartbeat
+
+A client that disappears without a close frame (dropped network, sleeping laptop, crashed browser) leaves a
+half-open TCP connection the server can keep for a long time, still counted against `limit` and still in
+every `broadcast`. Every `heartbeat` ms the server pings each connection; one that hasn't answered the
+previous ping, or sent anything else, by then is terminated, which emits `disconnect` with code `1006`. A
+dead peer is detected within one to two intervals.
+
+Browsers answer pings automatically, so the client needs no code for this. Set `heartbeat: false` to turn it
+off, for example when a proxy in front already does it.
+
+Heartbeat pongs don't reset `timeout`: an idle client still times out even though it answers pings.
+
+### Message size limit
+
+`maxPayload` (default 1 MiB) caps the size of a single message from a client. A bigger message closes the
+connection with `1009` (Message Too Big) and emits `error` on the controller (or logs it, when nothing
+listens). `ws` allows up to 100 MiB per message by default, which lets one client make the server buffer
+that much memory per connection. Raise the limit for endpoints that receive large uploads.
 
 ### Origin check
 
@@ -208,7 +230,7 @@ The `ws.WebSocket` subclass used for every managed connection (`instanceof WebSo
 - `connectedAt: number` / `uptime: number` — connection timestamps.
 - `params?: Record<string, string>` — the upgrade request's query parameters.
 - `metadata: Record<string, any>` — free-form bag for your own per-connection state.
-- `lastActivity?: number` — updated on `message`/`ping`/`pong` when `timeout` is configured.
+- `lastActivity?: number` — updated on client `message`/`ping` when `timeout` is configured.
 
 All the usual `ws` instance methods (`send`, `close`, `ping`, `pong`, `terminate`, `on`, event-listener
 methods, etc.) are available as normal.
@@ -355,4 +377,7 @@ to its own listener. A separate `server.ws.port` is therefore not needed.
 - Expired keys and stale rate-limit entries are swept every 30 seconds.
 - `authHandler`, `requiredParams`, and `rateLimit` are all enforced before a socket is added to a
   controller's registry — a rejected connection is closed and never tracked.
-- Sockets are removed from the registry the moment they close, so idle/dead connections cannot accumulate.
+- Sockets are removed from the registry the moment they close, and the heartbeat terminates peers that
+  vanished without closing, so dead connections cannot accumulate. See [Heartbeat](#heartbeat).
+- Client messages are capped at `maxPayload` (default 1 MiB) so one client can't make the server buffer
+  arbitrarily large frames. See [Message size limit](#message-size-limit).
