@@ -7,11 +7,6 @@ import {websockets} from "./src/lib/vite/index.js"; //!IMPORTANT Use @sourceregi
 
 export default defineConfig({
     plugins: [sveltekit({adapter: adapter(), preprocess: vitePreprocess()}), websockets()],
-    server: {
-        ws: {
-            port: 5174
-        }
-    },
     test: {
         expect: {requireAssertions: true},
         projects: [
