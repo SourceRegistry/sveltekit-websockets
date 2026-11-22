@@ -51,14 +51,16 @@ describe('websockets vite plugin', () => {
         writeFileSync(join(stubPackage, 'package.json'), JSON.stringify({
             name, type: 'module', exports: {'./server': './server.js'}
         }));
-        writeFileSync(join(stubPackage, 'server.js'), 'export const WebSockets = { upgrade() {} };\n');
+        writeFileSync(join(stubPackage, 'server.js'), 'export const WebSockets = { upgrade() {}, shutdowns: 0, async shutdown() { this.shutdowns++; } };\n');
         writeFileSync(join(buildDir, 'index.js'), adapterEntry);
 
         try {
             process.chdir(root);
             (websockets({packageOutputDir: 'build'}) as WebSocketsPlugin).closeBundle.handler();
             process.chdir(cwd);
-            return await import(pathToFileURL(join(buildDir, 'index.js')).href);
+            const entry = await import(pathToFileURL(join(buildDir, 'index.js')).href);
+            const {WebSockets} = await import(pathToFileURL(join(stubPackage, 'server.js')).href);
+            return Object.assign({}, entry, {WebSockets});
         } finally {
             process.chdir(cwd);
             rmSync(root, {recursive: true, force: true});
@@ -82,6 +84,20 @@ export const port = 3000;
 export const server = { server: httpServer };
 `);
         expect(entry.server.server.listenerCount('upgrade')).toBe(1);
+    });
+
+    it('shuts the WebSockets down as soon as the http server starts closing', async () => {
+        const entry = await runGeneratedEntry(`${stubServer}
+httpServer.closeCalls = 0;
+httpServer.close = function (cb) { this.closeCalls++; cb?.(); return this; };
+export { httpServer as server };
+`);
+        let closed = false;
+        entry.server.close(() => closed = true);
+
+        expect(entry.WebSockets.shutdowns).toBe(1);
+        expect(entry.server.closeCalls).toBe(1);
+        expect(closed).toBe(true);
     });
 
     it('fails loudly when the adapter entry exports no server', async () => {

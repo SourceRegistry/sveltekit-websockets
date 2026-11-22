@@ -3,6 +3,8 @@ import type {IncomingMessage} from "node:http";
 import {resolve, join, dirname} from 'node:path';
 import {styleText} from 'node:util';
 import type {Duplex} from "node:stream";
+import type {Socket} from "node:net";
+import {STATUS_CODES} from "node:http";
 
 import {readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, rmSync} from 'node:fs';
 
@@ -42,6 +44,17 @@ if (typeof httpServer?.on !== 'function') {
 }
 httpServer.on('upgrade', (req, socket, head) => WebSockets.upgrade(req, socket, head));
 
+// adapter-node shuts down by calling httpServer.close() (SIGINT, SIGTERM, socket-activation idle) and only
+// emits 'sveltekit:shutdown' once close() completes. close() waits for every connection, upgraded WebSockets
+// included, so close those as soon as shutdown starts instead of hanging until SHUTDOWN_TIMEOUT.
+if (typeof httpServer.close === 'function' && typeof WebSockets.shutdown === 'function') {
+    const close = httpServer.close;
+    httpServer.close = function (...args) {
+        WebSockets.shutdown().catch((error) => console.error('${_package.name}: WebSocket shutdown failed', error));
+        return close.apply(this, args);
+    };
+}
+
 console.log('> SvelteKit WebSockets adapter');
 
 export * from "./_index.js";
@@ -60,7 +73,34 @@ const ensureDirExists = (filePath: string) => {
     }
 };
 
-export const websockets = (opts = {packageOutputDir: 'build'}) => {
+export type WebSocketsPluginOptions = {
+    /** adapter-node's output directory, whose `index.js` is wrapped at build time. Default `'build'`. */
+    packageOutputDir?: string;
+    /**
+     * Dev and preview only: how long (ms) an upgrade request for a path without a registered route may wait
+     * for another listener (Vite's HMR or proxy, Vitest, other plugins) to answer before it gets a
+     * `404`. Without this such a request would hang forever. Default `5000`; `false` turns it off.
+     */
+    unhandledUpgradeTimeout?: number | false;
+};
+
+/** Answers an upgrade request nobody took with a 404, so the client doesn't wait forever. */
+const notFound = (socket: Duplex) => {
+    const body = 'No WebSocket endpoint at this path';
+    socket.end(
+        `HTTP/1.1 404 ${STATUS_CODES[404]}\r\n` +
+        'Connection: close\r\n' +
+        'Content-Type: text/plain; charset=utf-8\r\n' +
+        `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+        '\r\n' +
+        body
+    );
+    socket.once('finish', () => socket.destroy());
+};
+
+export const websockets = (options: WebSocketsPluginOptions = {}) => {
+    const opts = {packageOutputDir: 'build', unhandledUpgradeTimeout: 5000 as number | false, ...options};
+
     // Wraps the adapter-node entry (renamed to _index.js) with one that attaches the upgrade handler.
     const writeEntry = () => {
         try {
@@ -92,13 +132,39 @@ export const websockets = (opts = {packageOutputDir: 'build'}) => {
         }
     };
 
+    // The dev and preview servers have other 'upgrade' listeners (Vite's HMR and proxy, Vitest's browser
+    // runner), so only take the requests for registered routes and leave the rest to them. Vite ignores
+    // upgrades it doesn't own without answering, so one that nobody has answered after
+    // `unhandledUpgradeTimeout` gets a 404 instead of hanging.
+    const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+        if (WebSockets.handles(req)) {
+            WebSockets.upgrade(req, socket, head);
+            return;
+        }
+        const timeout = opts.unhandledUpgradeTimeout;
+        if (typeof timeout !== 'number' || !(timeout > 0)) return;
+        // A reset while nobody owns the socket would otherwise be an unhandled 'error'.
+        const ignore = () => {};
+        socket.on('error', ignore);
+        const timer = setTimeout(() => {
+            // Another listener answered (bytes went out) or closed the socket.
+            if (socket.destroyed || ((socket as Socket).bytesWritten ?? 0) > 0) return;
+            notFound(socket);
+        }, timeout);
+        timer.unref?.();
+        socket.once('close', () => {
+            clearTimeout(timer);
+            socket.off('error', ignore);
+        });
+    };
+
     return {
         name: 'sveltekit-websocket-server',
         configurePreviewServer: (server: {httpServer?: {on(event: 'upgrade', listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void): void} | null}) => {
-            server.httpServer?.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => WebSockets.upgrade(req, socket, head));
+            server.httpServer?.on('upgrade', onUpgrade);
         },
         configureServer: (server: {httpServer?: {on(event: 'upgrade', listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void): void} | null}) => {
-            server.httpServer?.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => WebSockets.upgrade(req, socket, head));
+            server.httpServer?.on('upgrade', onUpgrade);
         },
         // SvelteKit 2 runs the adapter while closing the bundle.
         closeBundle: {

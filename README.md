@@ -19,7 +19,9 @@ and a reactive Svelte component for the client.
 - 🧠 Lifecycle hooks: `connect`, `disconnect`, `error`, `destroy`
 - 🧩 Reactive Svelte component with auto-connect and snippets for streamed messages
 - ⚙️ Vite plugin that wires up `.upgrade()` handling in dev and preview
-- 🔐 Ephemeral, single-use connection keys with TTL and automatic cleanup
+- 🔐 Ephemeral, single-use connection keys with TTL, sent in a header (not the URL) so they stay out of logs
+- 🏷️ Typed messages: one codec (JSON or devalue) and shared types on both ends
+- 🛡️ Same-origin check, heartbeat for dead connections, and a 1 MiB message size limit by default
 
 ---
 
@@ -47,11 +49,6 @@ export default defineConfig({
         sveltekit(),
         websockets(), // ADD THIS — after sveltekit()
     ],
-    server: {
-        ws: {
-            port: 5174, // REQUIRED — see note below
-        },
-    },
 });
 ```
 
@@ -59,16 +56,18 @@ Without the plugin, `.upgrade()` requests fail in dev and preview (production bu
 patched automatically at build time; SvelteKit 2 and 3, `adapter-node` 5 and 6). Keep `websockets()` after
 `sveltekit()`: on SvelteKit 3 the build entry is written after the adapter has run, in plugin order.
 
-> ⚠️ **Also set `server.ws.port` to a different port, as shown above.** The plugin intercepts every
-> `'upgrade'` request on the dev server's HTTP port and closes any that don't match a registered route.
-> Vite's own HMR client connects over a WebSocket on that same port by default, so without a dedicated
-> `ws.port` it gets killed too — the browser loses its HMR connection, keeps retrying, and the page
-> reloads in a loop.
+In dev and preview the plugin only takes upgrade requests for registered routes and leaves the rest to
+Vite, so HMR keeps working on the dev server's port. (Earlier versions required `server.ws.port` to be set
+to a separate port; that is no longer needed, and leaving it set is harmless.)
+
+On `adapter-node`, the generated production entry closes all WebSockets (code `1001`) as soon as the server
+starts shutting down (SIGINT/SIGTERM), so shutdown doesn't hang on open connections.
 
 ### 2. Per-request WebSockets (`use()`)
 
 Bind a single-use WebSocket to a SvelteKit form action. The client gets back a one-time URL that expires
-automatically.
+automatically. Every call gets its own handler, so any number of users can connect through the same action
+at once.
 
 ```ts
 // src/routes/chat/+page.server.ts
@@ -103,6 +102,10 @@ chat.on('connect', (socket) => {
 
 Now reachable at `ws://localhost:5173/chat`.
 
+Browsers can only connect from the same origin by default, which blocks other sites from opening sockets
+with your visitors' cookies. To allow other origins, set `allowedOrigins` (e.g.
+`{allowedOrigins: ['https://app.example.com']}`); see [Origin check](./API.md#origin-check).
+
 ### 4. Svelte client component
 
 ```svelte
@@ -122,7 +125,10 @@ Now reachable at `ws://localhost:5173/chat`.
 | `action`     | `string`  | Form action that returns `{ url }`              |
 | `url`        | `string`  | Direct WebSocket URL, as an alternative to `action` |
 | `data`       | `T[]`     | Bindable, reactive array of received messages   |
+| `max_messages` | `number` | Most messages kept in `data`, oldest dropped first (default: `1000`; `Infinity` keeps all, `0` none) |
 | `auto_open`  | `boolean` | Auto-connect on mount (default: `true`)         |
+| `codec`      | `'json' \| 'devalue' \| Codec` | Decode received messages and encode `ctrl.send` (default: none, raw data); see [Typed messages](./API.md#typed-messages) |
+| `reconnect`  | `boolean \| ReconnectOptions` | Reconnect with exponential backoff after a drop (default: `false`) |
 | `controller` | snippet   | Render callback for manual `open()` / `close()` |
 | `message`    | snippet   | Render callback per received message            |
 
