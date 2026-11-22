@@ -20,6 +20,7 @@ and a reactive Svelte component for the client.
 - 🧩 Reactive Svelte component with auto-connect and snippets for streamed messages
 - ⚙️ Vite plugin that wires up `.upgrade()` handling in dev and preview
 - 🔐 Ephemeral, single-use connection keys with TTL and automatic cleanup
+- 🏷️ Typed messages: one codec (JSON or devalue) and shared types on both ends
 - 🛡️ Same-origin check, heartbeat for dead connections, and a 1 MiB message size limit by default
 
 ---
@@ -126,6 +127,7 @@ with your visitors' cookies. To allow other origins, set `allowedOrigins` (e.g.
 | `data`       | `T[]`     | Bindable, reactive array of received messages   |
 | `max_messages` | `number` | Most messages kept in `data`, oldest dropped first (default: `1000`; `Infinity` keeps all, `0` none) |
 | `auto_open`  | `boolean` | Auto-connect on mount (default: `true`)         |
+| `codec`      | `'json' \| 'devalue' \| Codec` | Decode received messages and encode `ctrl.send` (default: none, raw data); see [Typed messages](./API.md#typed-messages) |
 | `reconnect`  | `boolean \| ReconnectOptions` | Reconnect with exponential backoff after a drop (default: `false`) |
 | `controller` | snippet   | Render callback for manual `open()` / `close()` |
 | `message`    | snippet   | Render callback per received message            |

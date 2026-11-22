@@ -18,6 +18,7 @@ Developer reference for `@sourceregistry/sveltekit-websockets`. For installation
 - [`ReferencedWebSocket`](#referencedwebsocket)
 - [`WebSocketError`](#websocketerror)
 - [`WebSocketRawEndpointController`](#websocketrawendpointcontroller)
+- [Typed messages](#typed-messages)
 - [Client: `Action` / `ActionSocket`](#client-action--actionsocket)
 - [Client: `<WebSocket>` component](#client-websocket-component)
 - [Vite plugin internals](#vite-plugin-internals)
@@ -140,6 +141,7 @@ Same as `shutdown()` with the default timeout. Returns its promise.
 | `timeout`                | `number` (ms)                                    | disabled  | Idle timeout; reset on client `message`/`ping` (not on heartbeat pongs). Closes with `1001` on expiry. |
 | `heartbeat`              | `number` (ms) | `false`                         | `30_000`  | Ping interval; connections that don't answer by the next ping are terminated (`1006`). See [Heartbeat](#heartbeat). |
 | `maxPayload`             | `number` (bytes)                                 | `1_048_576` | Largest message a client may send; bigger messages close the connection with `1009`. `0` removes the limit. |
+| `codec`                  | `'json' \| 'devalue' \| Codec`                      | `'json'`  | How `sendMessage`/`onMessage`/`broadcastMessage` encode messages. See [Typed messages](#typed-messages). |
 | `rateLimit`              | `{max: number, window: number, key?: (req) => string | undefined}` | disabled  | Max connection attempts per client per window (ms). See [Rate limiting](#rate-limiting). |
 
 ### Heartbeat
@@ -264,6 +266,8 @@ Returned by `continuous()`/`use()`. Extends `EventEmitter` and implements `Gener
 - `new: string` — a fresh URL for this route, including a newly minted connection key when
   `useConnectionKeys` is enabled. Each read mints a new key.
 - `broadcast(data, options?, cb?)` — send to every open socket. `options.filter` selects a subset.
+- `broadcastMessage(message: Out, options?, cb?)` — encode `message` once with the endpoint's codec and
+  broadcast it. See [Typed messages](#typed-messages).
 - `send(ref, data, options?, cb?)` — send to one socket by its `ref`; returns `false` if not found/open.
 - `getConnectionsInfo()` — snapshot of all active connections plus pending-key/rate-limit counts.
 - `resetTimeout(ref)` — manually reset a socket's idle timeout.
@@ -285,6 +289,10 @@ The `ws.WebSocket` subclass used for every managed connection (`instanceof WebSo
 - `params?: Record<string, string>` — the upgrade request's query parameters.
 - `metadata: Record<string, any>` — free-form bag for your own per-connection state.
 - `lastActivity?: number` — updated on client `message`/`ping` when `timeout` is configured.
+- `sendMessage(message: Out, cb?)` — encode with the endpoint's codec and send as a text frame.
+- `onMessage(listener: (message: In) => void, onError?)` — decoded incoming messages; returns a function
+  that removes the listener. See [Typed messages](#typed-messages).
+- `codec: Codec` — the codec those two use (the endpoint's `codec`).
 
 All the usual `ws` instance methods (`send`, `close`, `ping`, `pong`, `terminate`, `on`, event-listener
 methods, etc.) are available as normal.
@@ -315,6 +323,76 @@ Backs `raw()`. Exposes only `path`, `config`, and `destroy()` — no connection 
 handler's responsibility. `destroy()` removes the route from the internal registry.
 
 ---
+
+## Typed messages
+
+Messages are plain text or binary frames by default. To send and receive typed values instead, give both
+ends the same codec and the message types. Define the types once, in a file both sides import:
+
+```ts
+// src/lib/chat.ts
+export type ClientMessage = { type: 'say', text: string };
+export type ServerMessage = { type: 'said', from: string, text: string } | { type: 'joined', user: string };
+```
+
+Server: `continuous<In, Out>()` and `use<In, Out>()` take the incoming (`In`) and outgoing (`Out`) types.
+
+```ts
+import type {ClientMessage, ServerMessage} from '$lib/chat';
+
+const chat = websockets.continuous<ClientMessage, ServerMessage>('/chat', {useConnectionKeys: false});
+
+chat.on('connect', (socket) => {
+    chat.broadcastMessage({type: 'joined', user: socket.ref});
+    socket.onMessage((message) => {           // message: ClientMessage
+        chat.broadcastMessage({type: 'said', from: socket.ref, text: message.text});
+    });
+});
+```
+
+Client: set the same `codec` on `<WebSocket>`. `data`, the `message`/`messages` snippets and `onmessage`
+then receive decoded messages, and `ctrl.send(message)` encodes. The component's type parameters
+(`T` received, `S` sent) are inferred from how you type the snippets or handlers:
+
+```svelte
+<script lang="ts">
+    import WebSocket, {type ActionSocketController} from '@sourceregistry/sveltekit-websockets';
+    import type {ClientMessage, ServerMessage} from '$lib/chat';
+</script>
+
+<WebSocket url="/chat" codec="json">
+    {#snippet message(msg: ServerMessage)}
+        <p>{msg.type === 'said' ? `${msg.from}: ${msg.text}` : `${msg.user} joined`}</p>
+    {/snippet}
+    {#snippet controller(ctrl: ActionSocketController<ClientMessage>)}
+        <button onclick={() => ctrl.send({type: 'say', text: 'hi'})}>Say hi</button>
+    {/snippet}
+</WebSocket>
+```
+
+Codecs:
+
+- `'json'` (the server default) — `JSON.stringify`/`JSON.parse`.
+- `'devalue'` — [devalue](https://github.com/sveltejs/devalue), as SvelteKit uses for load data: also
+  round-trips `Date`, `Map`, `Set`, `BigInt`, `URL`, repeated and cyclic references.
+- your own `{encode(message): string, decode(data: string): message}` (the exported `Codec` type). Also
+  exported: `jsonCodec`, `devalueCodec`.
+
+The types are compile-time only. `decode` gets whatever the other side sent, so validate on the server
+before trusting a message's shape — most simply in a custom codec, where a throw rejects the message:
+
+```ts
+import {z} from 'zod';
+const ClientMessage = z.object({type: z.literal('say'), text: z.string().max(500)});
+
+websockets.continuous('/chat', {
+    codec: {encode: JSON.stringify, decode: (data) => ClientMessage.parse(JSON.parse(data))},
+});
+```
+
+A message that fails to decode (including a binary frame) is skipped: on the server it goes to
+`onMessage`'s `onError` or the controller's `error` event, on the client to `onerror`. The connection stays
+open. Plain `send`, `broadcast` and `'message'` listeners keep working alongside, unencoded.
 
 ## Client: `Action` / `ActionSocket`
 
@@ -353,15 +431,20 @@ Full snippet surface, in addition to the props documented in the [README](./READ
 | `message`  | `(data: T, index: number, ws: WebSocket)`                | Once per message, in order.                |
 | `controller` | `(ctrl: ActionSocketController)`                       | Always — gives manual control regardless of `auto_open`. |
 
-Events: `onopen`, `onclose`, `onmessage` mirror the native `WebSocket` events; `onerror` instead receives an
+Props beyond the README table: `codec` (`'json' | 'devalue' | Codec`, default none) decodes received messages
+and encodes `ctrl.send`; see [Typed messages](#typed-messages).
+
+Events: `onopen`, `onclose`, `onmessage` mirror the native `WebSocket` events (with a `codec`, `onmessage`
+gets an event whose `data` is decoded); `onerror` instead receives an
 `ActionSocketError`. `onreconnect(attempt, delay)` fires when a reconnect is scheduled.
 
 `ActionSocketController` (passed to the `controller` snippet):
 
 ```ts
-type ActionSocketController = {
+type ActionSocketController<S = any> = {
     open(): Promise<void>;                        // also cancels a scheduled reconnect
     close(code?: number, reason?: string): void;  // also cancels pending connects and reconnects
+    send(message: S): boolean;                    // encoded with `codec` if set; false when not open
     readonly websocket: WebSocket | undefined;
     readonly isOpen: boolean;
     readonly state: number | undefined; // WebSocket.readyState
