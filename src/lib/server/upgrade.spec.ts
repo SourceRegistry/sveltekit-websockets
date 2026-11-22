@@ -349,3 +349,130 @@ describe('allowedOrigins', () => {
         expect(await handshake(url, {origin: 'https://trusted.example.com'})).toBe(101);
     });
 });
+
+describe('heartbeat', () => {
+    const client = (path: string, options: { autoPong?: boolean } = {}) => {
+        const ws = new WsClient(`ws://127.0.0.1:${port}${path}`, options);
+        ws.on('error', () => {});
+        let pings = 0;
+        ws.on('ping', () => pings++);
+        const opened = new Promise<void>((resolve) => ws.once('open', () => resolve()));
+        const closed = new Promise<number>((resolve) => ws.on('close', (code) => resolve(code)));
+        return {ws, opened, closed, pings: () => pings};
+    };
+
+    it('pings connections and keeps the ones that answer', async () => {
+        const chat = WebSockets.continuous('/hb-alive', {useConnectionKeys: false, heartbeat: 20});
+        const disconnect = vi.fn();
+        chat.on('disconnect', disconnect);
+
+        const c = client('/hb-alive');
+        await c.opened;
+        await sleep(150);
+
+        expect(c.pings()).toBeGreaterThanOrEqual(3);
+        expect(c.ws.readyState).toBe(WsClient.OPEN);
+        expect(disconnect).not.toHaveBeenCalled();
+        c.ws.close();
+    });
+
+    it('terminates a connection that stops answering', async () => {
+        const chat = WebSockets.continuous('/hb-dead', {useConnectionKeys: false, heartbeat: 20});
+        const disconnected = new Promise<number>((resolve) => chat.on('disconnect', (_ws, code) => resolve(code)));
+
+        const c = client('/hb-dead', {autoPong: false});
+        await c.opened;
+
+        expect(await disconnected).toBe(1006);
+        await c.closed;
+        expect(c.pings()).toBeGreaterThanOrEqual(1);
+    });
+
+    it('counts any message as a sign of life', async () => {
+        WebSockets.continuous('/hb-messages', {useConnectionKeys: false, heartbeat: 30});
+        const c = client('/hb-messages', {autoPong: false});
+        await c.opened;
+        const chatter = setInterval(() => c.ws.send('still here'), 10);
+
+        await sleep(150);
+        clearInterval(chatter);
+
+        expect(c.ws.readyState).toBe(WsClient.OPEN);
+        c.ws.close();
+    });
+
+    it('can be disabled', async () => {
+        WebSockets.continuous('/hb-off', {useConnectionKeys: false, heartbeat: false});
+        const c = client('/hb-off', {autoPong: false});
+        await c.opened;
+        await sleep(80);
+
+        expect(c.pings()).toBe(0);
+        expect(c.ws.readyState).toBe(WsClient.OPEN);
+        c.ws.close();
+    });
+
+    it('does not let heartbeat pongs reset the idle timeout', async () => {
+        WebSockets.continuous('/hb-timeout', {useConnectionKeys: false, heartbeat: 20, timeout: 100});
+        const c = client('/hb-timeout');
+        await c.opened;
+
+        expect(await c.closed).toBe(WebSocketError.TIMEOUT);
+        expect(c.pings()).toBeGreaterThanOrEqual(1);
+    });
+
+    it('applies to use() connections', async () => {
+        const url = WebSockets.use('/hb-use', () => {}, {heartbeat: 20});
+        const c = client(url, {autoPong: false});
+        await c.opened;
+
+        expect(await c.closed).toBe(1006);
+    });
+});
+
+describe('maxPayload', () => {
+    const echo = (path: string, config: { maxPayload?: number }) => {
+        const chat = WebSockets.continuous(path, {useConnectionKeys: false, ...config});
+        chat.on('error', () => {});
+        chat.on('connect', (socket) => socket.on('message', (data) => socket.send(data)));
+    };
+
+    const roundTrip = async (path: string, size: number) => {
+        const {ws, opened, closed} = connect(path);
+        await opened;
+        const reply = new Promise<number>((resolve) => ws.once('message', (data: Buffer) => resolve(data.length)));
+        ws.send(Buffer.alloc(size));
+        const result = await Promise.race([reply.then((length) => ({length})), closed]);
+        ws.close();
+        return result;
+    };
+
+    it('closes with 1009 when a message is bigger than the limit', async () => {
+        echo('/max-small', {maxPayload: 16});
+
+        expect(await roundTrip('/max-small', 16)).toEqual({length: 16});
+        expect(await roundTrip('/max-small', 17)).toMatchObject({code: 1009});
+    });
+
+    it('defaults to 1 MiB', async () => {
+        echo('/max-default', {});
+
+        expect(await roundTrip('/max-default', 1024 * 1024)).toEqual({length: 1024 * 1024});
+        expect(await roundTrip('/max-default', 1024 * 1024 + 1)).toMatchObject({code: 1009});
+    });
+
+    it('removes the limit with 0', async () => {
+        echo('/max-off', {maxPayload: 0});
+
+        expect(await roundTrip('/max-off', 2 * 1024 * 1024)).toEqual({length: 2 * 1024 * 1024});
+    });
+
+    it('applies a use() config to that endpoint', async () => {
+        const url = WebSockets.use('/max-use', (socket, controller) => {
+            controller.on('error', () => {});
+            socket.on('message', (data) => socket.send(data as Buffer));
+        }, {maxPayload: 8});
+
+        expect(await roundTrip(url, 9)).toMatchObject({code: 1009});
+    });
+});

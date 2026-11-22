@@ -39,6 +39,11 @@ declare global {
     var websockets: typeof WebSockets;
 }
 
+/** Default `WebSocketEndpointConfig.maxPayload`: 1 MiB. */
+export const DEFAULT_MAX_PAYLOAD = 1024 * 1024;
+/** Default `WebSocketEndpointConfig.heartbeat` interval: 30 seconds. */
+export const DEFAULT_HEARTBEAT = 30_000;
+
 // Enhanced socket with better metadata tracking
 export class ReferencedWebSocket extends WebSocket {
     private _ref: string = randomUUID();
@@ -271,6 +276,9 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
     private pendingKeys = new Map<string, PendingKey>();
     private rateLimitMap = new Map<string, { count: number; resetTime: number }>();
     private cleanupTimer?: NodeJS.Timeout;
+    private heartbeatTimer?: NodeJS.Timeout;
+    // Sockets pinged by the last heartbeat that haven't shown any sign of life since.
+    private unanswered = new WeakSet<ReferencedWebSocket>();
     private destroyed = false;
     private readonly _config: WebSocketEndpointConfig;
 
@@ -451,6 +459,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
             // Store parameters and add socket
             ws.params = Object.fromEntries(params.entries());
             this.sockets.set(ws.ref, ws);
+            this.watchHeartbeat(ws);
 
             // Setup timeout
             if (this.config.timeout && this.config.timeout > 0) {
@@ -460,6 +469,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
             // Setup event listeners
             ws.once('close', (code: number, reason: Buffer) => {
                 this.sockets.delete(ws.ref);
+                if (this.sockets.size === 0) this.stopHeartbeat();
                 if (ws.timeoutTimer) {
                     clearTimeout(ws.timeoutTimer);
                     ws.timeoutTimer = undefined;
@@ -471,12 +481,12 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
                 this.reportError(error, ws);
             });
 
-            // Activity tracking
+            // Activity tracking. Pongs don't count: they answer the server's own heartbeat pings, which would
+            // otherwise keep every idle connection alive forever.
             if (this.config.timeout && this.config.timeout > 0) {
                 const activityHandler = () => this.resetSocketTimeout(ws);
                 ws.on('message', activityHandler);
                 ws.on('ping', activityHandler);
-                ws.on('pong', activityHandler);
             }
 
             this.emit('connect', ws);
@@ -485,6 +495,54 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
             this.reportError(error, ws);
             ws.close(1011, 'Internal server error');
             return false;
+        }
+    }
+
+    /** The heartbeat interval in ms, or `undefined` when disabled. */
+    private get heartbeatInterval(): number | undefined {
+        const interval = this.config.heartbeat ?? DEFAULT_HEARTBEAT;
+        return typeof interval === 'number' && interval > 0 ? interval : undefined;
+    }
+
+    private watchHeartbeat(ws: ReferencedWebSocket) {
+        const interval = this.heartbeatInterval;
+        if (!interval) return;
+        // Any frame from the peer proves the connection is alive, not just a pong.
+        const alive = () => this.unanswered.delete(ws);
+        ws.on('pong', alive);
+        ws.on('ping', alive);
+        ws.on('message', alive);
+        if (!this.heartbeatTimer) {
+            this.heartbeatTimer = setInterval(() => this.heartbeat(), interval);
+            this.heartbeatTimer.unref?.();
+        }
+    }
+
+    /**
+     * Pings every open socket and terminates the ones that haven't answered the previous ping. A peer that
+     * vanished without a close frame (network drop, sleeping laptop, crashed client) is otherwise kept open
+     * by the OS for a long time.
+     */
+    private heartbeat() {
+        for (const ws of this.sockets.values()) {
+            if (ws.readyState !== WebSocket.OPEN) continue;
+            if (this.unanswered.has(ws)) {
+                ws.terminate();
+                continue;
+            }
+            this.unanswered.add(ws);
+            try {
+                ws.ping();
+            } catch (error) {
+                this.reportError(error, ws);
+            }
+        }
+    }
+
+    private stopHeartbeat() {
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = undefined;
         }
     }
 
@@ -690,6 +748,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
             clearInterval(this.cleanupTimer);
             this.cleanupTimer = undefined;
         }
+        this.stopHeartbeat();
 
         // Clear all timers and maps
         for (const socket of this.sockets.values()) {
@@ -750,7 +809,22 @@ export type WebSocketEndpointConfig = {
     useConnectionKeys?: boolean;
     pendingKeyExpiration?: number;
     requiredParams?: string[];
+    /**
+     * Idle timeout in ms: closes a connection that hasn't sent a message or ping for this long. Disabled by
+     * default. Pongs (answers to the heartbeat) don't count as activity.
+     */
     timeout?: number;
+    /**
+     * Ping interval in ms. A connection that hasn't answered the previous ping (or sent anything else) by the
+     * next one is terminated, which emits `disconnect` with code `1006`. Default `30_000`; `false` or `0`
+     * disables it.
+     */
+    heartbeat?: number | false;
+    /**
+     * Largest message, in bytes, a client may send. A bigger message closes the connection with `1009`.
+     * Default `1_048_576` (1 MiB); `0` removes the limit.
+     */
+    maxPayload?: number;
     rateLimit?: {
         max: number;
         window: number; // in milliseconds
@@ -955,7 +1029,20 @@ function rejectUpgrade(socket: Duplex, code: number, reason: string) {
 }
 
 const allowed_routes = new Map<string, GenericWebSocketEndpointController>();
-const server = new WebSocketServer({noServer: true, WebSocket: ReferencedWebSocket});
+
+// `maxPayload` is a server-level option in `ws`, so there is one (cheap, port-less) server per limit in use.
+const createServer = (maxPayload: number) =>
+    new WebSocketServer({noServer: true, clientTracking: false, maxPayload, WebSocket: ReferencedWebSocket});
+const servers = new Map<number, ReturnType<typeof createServer>>();
+const serverFor = (maxPayload: number = DEFAULT_MAX_PAYLOAD) => {
+    const limit = Number.isFinite(maxPayload) && maxPayload > 0 ? Math.floor(maxPayload) : 0;
+    let server = servers.get(limit);
+    if (!server) {
+        server = createServer(limit);
+        servers.set(limit, server);
+    }
+    return server;
+};
 
 /** Removes a route only if it still belongs to `controller` (a newer controller may have taken the path). */
 const unregister = (path: string, controller: GenericWebSocketEndpointController) => {
@@ -1074,7 +1161,8 @@ export const WebSockets = {
                 }
                 await controller.beforeUpgrade({
                     req, head,
-                    accept: () => server.handleUpgrade(req, socket, head, (ws, req) => controller.add(ws, req)),
+                    accept: () => serverFor(controller.config.maxPayload)
+                        .handleUpgrade(req, socket, head, (ws, req) => controller.add(ws, req)),
                     decline: (reason, code = 400) => rejectUpgrade(socket, code, reason)
                 });
             } else if (controller instanceof WebSocketRequestEndpointController) {
@@ -1084,7 +1172,7 @@ export const WebSockets = {
                     rejectUpgrade(socket, 403, 'Origin not allowed');
                     return;
                 }
-                server.handleUpgrade(req, socket, head, async (ws, req) => {
+                serverFor(endpoint?.config.maxPayload).handleUpgrade(req, socket, head, async (ws, req) => {
                     if (!endpoint) {
                         ws.close(WebSocketError.INVALID_KEY, 'Invalid or expired connection key');
                         return;
