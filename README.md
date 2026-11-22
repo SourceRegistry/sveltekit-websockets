@@ -19,7 +19,7 @@ and a reactive Svelte component for the client.
 - 🧠 Lifecycle hooks: `connect`, `disconnect`, `error`, `destroy`
 - 🧩 Reactive Svelte component with auto-connect and snippets for streamed messages
 - ⚙️ Vite plugin that wires up `.upgrade()` handling in dev and preview
-- 🔐 Ephemeral, single-use connection keys with TTL and automatic cleanup
+- 🔐 Ephemeral, single-use connection keys with TTL, sent in a header (not the URL) so they stay out of logs
 - 🏷️ Typed messages: one codec (JSON or devalue) and shared types on both ends
 - 🛡️ Same-origin check, heartbeat for dead connections, and a 1 MiB message size limit by default
 

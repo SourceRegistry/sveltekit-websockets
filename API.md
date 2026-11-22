@@ -135,7 +135,8 @@ Same as `shutdown()` with the default timeout. Returns its promise.
 | `authHandler`            | `(req) => boolean \| Promise<boolean>`           | allow all | Called before the handshake; returning `false` answers HTTP `401`. See [Connection checks](#connection-checks). |
 | `allowedOrigins`         | `'same-origin' \| '*' \| string[] \| (origin, req) => boolean \| Promise<boolean>` | `'same-origin'` | Browser origins allowed to connect; others get HTTP `403` before the handshake. See [Origin check](#origin-check). |
 | `limit`                  | `number`                                         | unlimited | Max simultaneous connections; further upgrades get HTTP `503`.                |
-| `useConnectionKeys`      | `boolean`                                        | `true`    | Require a one-time `?key=` query param minted by `.new`.                     |
+| `useConnectionKeys`      | `boolean`                                        | `true`    | Require a one-time connection key minted by `.new`. See [Connection keys](#connection-keys). |
+| `allowKeyInQuery`        | `boolean`                                        | `true`    | Also accept the key from `?key=` (not only the `Sec-WebSocket-Protocol` header). |
 | `pendingKeyExpiration`   | `number` (ms)                                    | `120_000` | TTL for an unused connection key.                                            |
 | `requiredParams`         | `string[]`                                       | `[]`      | Query params that must be present, otherwise HTTP `400`.                      |
 | `timeout`                | `number` (ms)                                    | disabled  | Idle timeout; reset on client `message`/`ping` (not on heartbeat pongs). Closes with `1001` on expiry. |
@@ -163,6 +164,30 @@ Heartbeat pongs don't reset `timeout`: an idle client still times out even thoug
 connection with `1009` (Message Too Big) and emits `error` on the controller (or logs it, when nothing
 listens). `ws` allows up to 100 MiB per message by default, which lets one client make the server buffer
 that much memory per connection. Raise the limit for endpoints that receive large uploads.
+
+### Connection keys
+
+`use()` and `.new` return URLs with a one-time `?key=`. Sent as is, the key would land in every access log,
+proxy log and monitoring tool that records request URLs. So the bundled client (`<WebSocket>`, `Action`,
+`ActionSocket`) moves it out of the URL into the subprotocol list before connecting: it offers
+`sveltekit-websockets` and `sveltekit-websockets.key.<key>`, which browsers send in the
+`Sec-WebSocket-Protocol` header. The server reads the key from there and answers with a protocol that doesn't
+carry it (your own, if you pass `protocols`, else `sveltekit-websockets`), so it is never echoed back.
+
+The server still accepts `?key=` by default, so clients that open the URL directly keep working. Once all
+your clients send the key in the header, set `allowKeyInQuery: false` to refuse query keys (HTTP `403`).
+
+For your own clients, `splitConnectionKey(url, protocols?)` (exported from both the client and server
+entries) does the same move:
+
+```ts
+import {splitConnectionKey} from '@sourceregistry/sveltekit-websockets';
+
+const {url, protocols} = splitConnectionKey(urlFromAction);
+const socket = new WebSocket(url, protocols);
+```
+
+On the server, `connectionKey(req, allowQuery?)` reads a request's key from either place.
 
 ### Connection checks
 
@@ -529,7 +554,9 @@ than that to accept, or set `false` to leave such requests alone.
 - Browser `Origin` headers are checked against `allowedOrigins` (default same-origin) before the
   handshake, which blocks cross-site WebSocket hijacking. See [Origin check](#origin-check).
 - Connection keys (`use()`, and `continuous()` unless disabled) are single-use, random (256-bit,
-  URL-safe), and expire after `pendingKeyExpiration` (default 2 minutes).
+  URL-safe), and expire after `pendingKeyExpiration` (default 2 minutes). The bundled client sends them in
+  the `Sec-WebSocket-Protocol` header, not the URL, so they stay out of access logs; `allowKeyInQuery: false`
+  makes that mandatory. See [Connection keys](#connection-keys).
 - Expired keys and stale rate-limit entries are swept every 30 seconds.
 - Rate limits count per client IP, resolved through `ADDRESS_HEADER`/`XFF_DEPTH` behind a proxy and per
   /64 for IPv6, so a client can't get a fresh limit by changing its User-Agent or prepending
