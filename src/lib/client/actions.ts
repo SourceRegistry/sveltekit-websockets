@@ -76,6 +76,11 @@ export type WebSocketProps<T = any> =
     {
         auto_open?: boolean,
         data?: T[],
+        /**
+         * Most messages kept in `data`; older ones are dropped first. Default `1000`. `Infinity` keeps
+         * everything, `0` keeps nothing (use `onmessage`).
+         */
+        max_messages?: number,
         binaryType?: BinaryType,
         /** Reconnect automatically; `true` uses the defaults of {@link ReconnectOptions}. Default `false`. */
         reconnect?: boolean | ReconnectOptions

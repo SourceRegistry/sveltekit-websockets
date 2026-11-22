@@ -32,6 +32,7 @@
         messages,
         message,
         auto_open = true,
+        max_messages = 1000,
         ...restProps
     }: WebSocketProps<T> = $props();
 
@@ -48,6 +49,15 @@
     // Consecutive reconnect attempts since the last successful open.
     let retries = 0;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    // Adds a message, dropping the oldest ones beyond `max_messages` so a long-lived socket can't grow `data`
+    // without bound.
+    const append = (list: typeof data, item: MessageEvent<T>['data']): typeof data => {
+        const max = Number.isNaN(max_messages) ? 1000 : Math.max(0, Math.floor(max_messages));
+        if (max === 0) return list.length ? [] : list;
+        const drop = Math.max(0, list.length + 1 - max);
+        return drop ? [...list.slice(drop), item] : [...list, item];
+    };
 
     const reconnectOptions = (): ReconnectOptions | undefined =>
         restProps.reconnect === true ? {} : restProps.reconnect || undefined;
@@ -112,7 +122,7 @@
         socket.binaryType = restProps.binaryType ? restProps.binaryType : 'arraybuffer';
         socket.onmessage = (event) => {
             onmessage?.(event)
-            if (ws === socket) data = [...data, event.data];
+            if (ws === socket) data = append(data, event.data);
         }
         socket.onopen = (event) => {
             restProps.onopen?.(event)

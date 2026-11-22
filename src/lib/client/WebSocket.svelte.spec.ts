@@ -35,6 +35,10 @@ class FakeWebSocket {
         this.onopen?.(new Event('open'));
     }
 
+    simulateMessage(data: unknown) {
+        this.onmessage?.(new MessageEvent('message', {data}));
+    }
+
     simulateClose(code: number) {
         this.readyState = FakeWebSocket.CLOSED;
         this.onclose?.(new CloseEvent('close', {code}));
@@ -317,5 +321,46 @@ describe('WebSocket component reconnect', () => {
         await vi.advanceTimersByTimeAsync(1000);
         await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
         expect(fetch).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe('WebSocket component data', () => {
+    // Renders `data` as JSON through the `messages` snippet, so the test reads what the component holds.
+    const messages = createRawSnippet((getData: () => unknown[]) => ({
+        render: () => '<output></output>',
+        setup: (node: Element) => {
+            $effect(() => {
+                node.textContent = JSON.stringify(getData());
+            });
+        }
+    }));
+
+    const received = async (props: Record<string, unknown>, count: number) => {
+        const {container} = await mount({url: 'ws://example.test/socket', messages, ...props});
+        last().simulateOpen();
+        for (let i = 1; i <= count; i++) last().simulateMessage(i);
+        await flush();
+        return JSON.parse(container.querySelector('output')?.textContent || 'null');
+    };
+
+    it('keeps the latest max_messages messages', async () => {
+        expect(await received({max_messages: 3}, 5)).toEqual([3, 4, 5]);
+    });
+
+    it('keeps 1000 messages by default', async () => {
+        const data = await received({}, 1005);
+        expect(data).toHaveLength(1000);
+        expect(data[0]).toBe(6);
+        expect(data[999]).toBe(1005);
+    });
+
+    it('keeps everything with Infinity', async () => {
+        expect(await received({max_messages: Infinity}, 1005)).toHaveLength(1005);
+    });
+
+    it('keeps nothing with 0 but still calls onmessage', async () => {
+        const onmessage = vi.fn();
+        expect(await received({max_messages: 0, onmessage}, 3)).toEqual([]);
+        expect(onmessage).toHaveBeenCalledTimes(3);
     });
 });
