@@ -124,6 +124,7 @@ with your visitors' cookies. To allow other origins, set `allowedOrigins` (e.g.
 | `action`     | `string`  | Form action that returns `{ url }`              |
 | `url`        | `string`  | Direct WebSocket URL, as an alternative to `action` |
 | `data`       | `T[]`     | Bindable, reactive array of received messages   |
+| `max_messages` | `number` | Most messages kept in `data`, oldest dropped first (default: `1000`; `Infinity` keeps all, `0` none) |
 | `auto_open`  | `boolean` | Auto-connect on mount (default: `true`)         |
 | `reconnect`  | `boolean \| ReconnectOptions` | Reconnect with exponential backoff after a drop (default: `false`) |
 | `controller` | snippet   | Render callback for manual `open()` / `close()` |

@@ -137,7 +137,7 @@ Same as `shutdown()` with the default timeout. Returns its promise.
 | `timeout`                | `number` (ms)                                    | disabled  | Idle timeout; reset on client `message`/`ping` (not on heartbeat pongs). Closes with `1001` on expiry. |
 | `heartbeat`              | `number` (ms) | `false`                         | `30_000`  | Ping interval; connections that don't answer by the next ping are terminated (`1006`). See [Heartbeat](#heartbeat). |
 | `maxPayload`             | `number` (bytes)                                 | `1_048_576` | Largest message a client may send; bigger messages close the connection with `1009`. `0` removes the limit. |
-| `rateLimit`              | `{max: number, window: number}`                  | disabled  | Max connection attempts per client (IP + User-Agent) per rolling window.      |
+| `rateLimit`              | `{max: number, window: number, key?: (req) => string | undefined}` | disabled  | Max connection attempts per client per window (ms). See [Rate limiting](#rate-limiting). |
 
 ### Heartbeat
 
@@ -158,6 +158,27 @@ Heartbeat pongs don't reset `timeout`: an idle client still times out even thoug
 connection with `1009` (Message Too Big) and emits `error` on the controller (or logs it, when nothing
 listens). `ws` allows up to 100 MiB per message by default, which lets one client make the server buffer
 that much memory per connection. Raise the limit for endpoints that receive large uploads.
+
+### Rate limiting
+
+`rateLimit` counts connection attempts per client and closes the ones over `max` per `window` ms with
+`1013` (emitting `rateLimit`). Clients are told apart by IP address, resolved like adapter-node's
+`getClientAddress()`:
+
+- By default, the TCP peer address. Behind a reverse proxy that is the proxy, so every user would share one
+  limit.
+- Set the `ADDRESS_HEADER` environment variable (the same one adapter-node reads) to the header your proxy
+  sets, e.g. `X-Forwarded-For` or `X-Real-IP`. With `X-Forwarded-For`, `XFF_DEPTH` (default `1`) is the
+  number of trusted proxies: the address is taken that many entries from the right, so entries a client
+  adds itself are ignored. If the header is missing or too short, the TCP peer is used.
+- IPv6 addresses share one limit per /64, since a client usually controls the whole block.
+
+Only set `ADDRESS_HEADER` when a proxy always sets that header; otherwise clients can pick their own address.
+To identify clients differently (a user id, an API key), pass `rateLimit.key(req)`; returning `undefined`
+exempts the request. The resolver is exported as `clientAddress(req, {addressHeader?, xffDepth?})`.
+
+`rateLimit` has no effect on `use()`: every call gets its own controller with a single connection. Rate-limit
+the form action that calls `use()` instead.
 
 ### Origin check
 
@@ -293,7 +314,7 @@ Full snippet surface, in addition to the props documented in the [README](./READ
 | Snippet    | Signature                                             | Renders                                   |
 |------------|--------------------------------------------------------|--------------------------------------------|
 | `children` | `(ws: WebSocket)`                                       | Once the socket is open.                   |
-| `messages` | `(data: T[], ws: WebSocket)`                             | Once, with the full accumulated message list. |
+| `messages` | `(data: T[], ws: WebSocket)`                             | Once, with the received messages (the latest `max_messages`). |
 | `message`  | `(data: T, index: number, ws: WebSocket)`                | Once per message, in order.                |
 | `controller` | `(ctrl: ActionSocketController)`                       | Always — gives manual control regardless of `auto_open`. |
 
@@ -375,6 +396,9 @@ to its own listener. A separate `server.ws.port` is therefore not needed.
 - Connection keys (`use()`, and `continuous()` unless disabled) are single-use, random (256-bit,
   URL-safe), and expire after `pendingKeyExpiration` (default 2 minutes).
 - Expired keys and stale rate-limit entries are swept every 30 seconds.
+- Rate limits count per client IP, resolved through `ADDRESS_HEADER`/`XFF_DEPTH` behind a proxy and per
+  /64 for IPv6, so a client can't get a fresh limit by changing its User-Agent or prepending
+  `X-Forwarded-For` entries. See [Rate limiting](#rate-limiting).
 - `authHandler`, `requiredParams`, and `rateLimit` are all enforced before a socket is added to a
   controller's registry — a rejected connection is closed and never tracked.
 - Sockets are removed from the registry the moment they close, and the heartbeat terminates peers that
