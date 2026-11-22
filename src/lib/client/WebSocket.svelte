@@ -29,47 +29,70 @@
     let ws = $state<WebSocket>();
     let open = $state<boolean>(false);
 
-    const ctrl: ActionSocketController = {
-        async open() {
-            if (ws && ws.readyState === WebSocket.OPEN) return;
-            let url: string;
-            let protocols: (string | string[])
-            if ('action' in restProps && restProps.action) {
-                try {
-                    const result = await Action(restProps.action, restProps.init, restProps.devalue ?? true);
-                    url = result.url;
-                    protocols = result.protocols
-                } catch (e) {
-                    restProps.onerror?.(new ActionSocketError(e));
-                    return;
-                }
-            } else if ('url' in restProps && restProps.url) {
-                url = restProps.url instanceof URL ? restProps.url.toString() : restProps.url;
-                protocols = restProps.protocols ? restProps.protocols : [];
-            } else {
-                restProps.onerror?.(new ActionSocketError('url or action is required'));
+    // In-flight open(); repeated open() calls share it instead of creating a second socket.
+    let opening: Promise<void> | undefined;
+    // Bumped by close(): an open() still waiting on its action must not create a socket afterwards.
+    let attempt = 0;
+    let destroyed = false;
+
+    const connect = async (current: number) => {
+        let url: string;
+        let protocols: (string | string[])
+        if ('action' in restProps && restProps.action) {
+            try {
+                const result = await Action(restProps.action, restProps.init, restProps.devalue ?? true);
+                url = result.url;
+                protocols = result.protocols
+            } catch (e) {
+                if (current === attempt) restProps.onerror?.(new ActionSocketError(e));
                 return;
             }
+        } else if ('url' in restProps && restProps.url) {
+            url = restProps.url instanceof URL ? restProps.url.toString() : restProps.url;
+            protocols = restProps.protocols ? restProps.protocols : [];
+        } else {
+            restProps.onerror?.(new ActionSocketError('url or action is required'));
+            return;
+        }
 
-            ws = new WebSocket(url, protocols);
-            ws.binaryType = restProps.binaryType ? restProps.binaryType : 'arraybuffer';
-            ws.onmessage = (event) => {
-                onmessage?.(event)
-                data = [...data, event.data];
+        // close() ran or the component unmounted while the action was in flight.
+        if (current !== attempt || destroyed) return;
+
+        const socket = new WebSocket(url, protocols);
+        ws = socket;
+        socket.binaryType = restProps.binaryType ? restProps.binaryType : 'arraybuffer';
+        socket.onmessage = (event) => {
+            onmessage?.(event)
+            if (ws === socket) data = [...data, event.data];
+        }
+        socket.onopen = (event) => {
+            restProps.onopen?.(event)
+            if (ws === socket) open = true;
+        }
+        socket.onclose = (event) => {
+            restProps.onclose?.(event)
+            if (ws === socket) open = false;
+        }
+        socket.onerror = (event) => {
+            restProps.onerror?.(new ActionSocketError(event));
+        }
+    }
+
+    const ctrl: ActionSocketController = {
+        open() {
+            if (destroyed) return Promise.resolve();
+            if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return Promise.resolve();
+            if (!opening) {
+                const pending: Promise<void> = connect(attempt).finally(() => {
+                    if (opening === pending) opening = undefined;
+                });
+                opening = pending;
             }
-            ws.onopen = (event) => {
-                restProps.onopen?.(event)
-                open = true;
-            }
-            ws.onclose = (event) => {
-                restProps.onclose?.(event)
-                open = false;
-            }
-            ws.onerror = (event) => {
-                restProps.onerror?.(new ActionSocketError(event));
-            }
+            return opening;
         },
         close(code?: number, reason?: string) {
+            attempt++;
+            opening = undefined;
             if (!ws) return
             if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) return
             ws.close(code, reason)
@@ -90,7 +113,10 @@
         if (auto_open) await ctrl.open();
     })
 
-    onDestroy(() => ctrl.close());
+    onDestroy(() => {
+        destroyed = true;
+        ctrl.close();
+    });
 
 </script>
 
