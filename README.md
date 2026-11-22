@@ -47,11 +47,6 @@ export default defineConfig({
         sveltekit(),
         websockets(), // ADD THIS — after sveltekit()
     ],
-    server: {
-        ws: {
-            port: 5174, // REQUIRED — see note below
-        },
-    },
 });
 ```
 
@@ -59,16 +54,18 @@ Without the plugin, `.upgrade()` requests fail in dev and preview (production bu
 patched automatically at build time; SvelteKit 2 and 3, `adapter-node` 5 and 6). Keep `websockets()` after
 `sveltekit()`: on SvelteKit 3 the build entry is written after the adapter has run, in plugin order.
 
-> ⚠️ **Also set `server.ws.port` to a different port, as shown above.** The plugin intercepts every
-> `'upgrade'` request on the dev server's HTTP port and closes any that don't match a registered route.
-> Vite's own HMR client connects over a WebSocket on that same port by default, so without a dedicated
-> `ws.port` it gets killed too — the browser loses its HMR connection, keeps retrying, and the page
-> reloads in a loop.
+In dev and preview the plugin only takes upgrade requests for registered routes and leaves the rest to
+Vite, so HMR keeps working on the dev server's port. (Earlier versions required `server.ws.port` to be set
+to a separate port; that is no longer needed, and leaving it set is harmless.)
+
+On `adapter-node`, the generated production entry closes all WebSockets (code `1001`) as soon as the server
+starts shutting down (SIGINT/SIGTERM), so shutdown doesn't hang on open connections.
 
 ### 2. Per-request WebSockets (`use()`)
 
 Bind a single-use WebSocket to a SvelteKit form action. The client gets back a one-time URL that expires
-automatically.
+automatically. Every call gets its own handler, so any number of users can connect through the same action
+at once.
 
 ```ts
 // src/routes/chat/+page.server.ts

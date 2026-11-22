@@ -10,6 +10,8 @@ Developer reference for `@sourceregistry/sveltekit-websockets`. For installation
   - [`use(route, connectionHandler, config?)`](#useroute-connectionhandler-config)
   - [`raw(route, handle)`](#rawroute-handle)
   - [`upgrade(req, socket, head)`](#upgradereq-socket-head)
+  - [`handles(req)`](#handlesreq)
+  - [`shutdown(timeout?)`](#shutdowntimeout)
   - [`clear()`](#clear)
 - [`WebSocketEndpointConfig`](#websocketendpointconfig)
 - [`WebSocketEndpointController`](#websocketendpointcontroller)
@@ -41,12 +43,15 @@ const chat = websockets.continuous('/chat', {timeout: 60_000});
 - `config` — [`WebSocketEndpointConfig`](#websocketendpointconfig), minus `disposer`/`path`.
 - Calling this again for the same path returns the **existing** controller; the `config` argument is
   ignored on subsequent calls.
+- Throws if the path is already registered by `use()` or `raw()`.
 
 ### `use(route, connectionHandler, config?)`
 
-Creates a **single-use** endpoint bound to one connection, returns the connection URL (including a
-one-time key, unless `useConnectionKeys: false`). Once that one connection closes, the route is torn down
-automatically.
+Creates a **single-use** endpoint bound to one connection and returns the connection URL, including a
+one-time key. Every call gets its own controller and handler, so concurrent calls for the same route (e.g.
+many users hitting the same form action) are isolated: each key reaches the handler of the call that minted
+it. The endpoint is released when its connection closes, when its handshake is rejected, or when its key
+expires unused (`pendingKeyExpiration`).
 
 ```ts
 export const actions = {
@@ -58,8 +63,12 @@ export const actions = {
 };
 ```
 
-- `connectionHandler(socket, controller)` fires once, on the first (and only) connection.
+- `connectionHandler(socket, controller)` fires once, on the first (and only) connection. A synchronous throw
+  closes the socket with `1011`; a rejected promise is reported as an `error` event on the controller (or
+  logged if nobody listens).
 - `config` — same as `continuous`, minus `disposer`/`limit`/`path` (`limit` is forced to `1`).
+  `useConnectionKeys: false` is ignored: the key is what routes the connection to this call's handler.
+- Throws if the path is already registered by `continuous()` or `raw()`.
 
 ### `raw(route, handle)`
 
@@ -78,11 +87,40 @@ websockets.raw('/legacy', async (req, socket, head) => {
 The HTTP `'upgrade'` event handler. Wired up for you by the [Vite plugin](#vite-plugin-internals) in dev
 and by the production adapter patch; call it yourself only if you're integrating with a custom server.
 
+An upgrade for a path with no registered route gets its socket ended.
+
+### `handles(req)`
+
+`true` when a route is registered for the upgrade request's path. Use it on a server that has other
+`'upgrade'` listeners, so requests this library doesn't own are left to them:
+
+```ts
+httpServer.on('upgrade', (req, socket, head) => {
+    if (websockets.handles(req)) websockets.upgrade(req, socket, head);
+});
+```
+
+The Vite plugin does this in dev and preview.
+
+### `shutdown(timeout?)`
+
+Unregisters every route and closes every connection with code `1001`, force-terminating sockets still open
+after `timeout` ms (default `5000`). Resolves once all controllers are destroyed.
+
+Node's `httpServer.close()` waits for upgraded WebSocket connections too, so a server shutdown hangs until
+they close. The generated `adapter-node` entry calls `shutdown()` as soon as `httpServer.close()` is called
+(which adapter-node does on SIGINT/SIGTERM). With a custom server, call it yourself:
+
+```ts
+process.on('SIGTERM', async () => {
+    await websockets.shutdown();
+    httpServer.close();
+});
+```
+
 ### `clear()`
 
-Removes every registered route and gracefully shuts down all `WebSocketEndpointController` instances
-(closing their sockets with code `1001`, force-terminating after 5s). Intended for test teardown or a full
-server reset — not typically needed in application code.
+Same as `shutdown()` with the default timeout. Returns its promise.
 
 ---
 
@@ -119,7 +157,9 @@ Returned by `continuous()`/`use()`. Extends `EventEmitter` and implements `Gener
 - `path: string` — the registered route pathname.
 - `config: WebSocketEndpointConfig` — the effective (merged-with-defaults) config.
 - `beforeUpgrade?: UpgradeHandler` — set this to intercept the raw upgrade before a socket is created; call
-  `accept()` or `decline(reason, code?)`. Defaults to auto-accept.
+  `accept()` or `decline(reason, code?)`. Defaults to auto-accept. `decline` answers with an HTTP response:
+  `code` is the HTTP status (`400`–`599`, default `400`; anything else is sent as `400`) and `reason` is the
+  response body.
 - `new: string` — a fresh URL for this route, including a newly minted connection key when
   `useConnectionKeys` is enabled. Each read mints a new key.
 - `broadcast(data, options?, cb?)` — send to every open socket. `options.filter` selects a subset.
@@ -152,7 +192,8 @@ methods, etc.) are available as normal.
 
 ## `WebSocketError`
 
-Close codes used internally:
+Close codes used internally. A plain `as const` object (not an enum), since several names share a code;
+`WebSocketError` is also the type of its values.
 
 | Name                   | Code   |
 |------------------------|--------|
@@ -231,29 +272,24 @@ type ActionSocketController = {
 `websockets({packageOutputDir: 'build'})` does two things:
 
 1. **Dev & preview** — hooks the underlying HTTP server's `'upgrade'` event to
-   `websockets.upgrade`, so `.upgrade()` requests work under `vite dev` / `vite preview`.
+   `websockets.upgrade` for registered routes only, so `.upgrade()` requests work under `vite dev` /
+   `vite preview` while other upgrades (Vite's HMR) are left alone.
 2. **Production build (`closeBundle`, after `adapter-node` writes its output)** — patches the built
    `index.js` in `packageOutputDir` (default `build/`) so the standalone Node server also handles upgrades:
    the original adapter entrypoint is renamed to `_index.js`, and a small wrapper `index.js` is generated
-   that imports it, attaches the upgrade handler to its `server`, and re-exports it. This step is idempotent
+   that imports it, attaches the upgrade handler to its `server`, calls [`shutdown()`](#shutdowntimeout) as
+   soon as that server starts closing, and re-exports it. This step is idempotent
    — re-running the build regenerates the wrapper without re-renaming an already-wrapped entrypoint.
 
 This currently assumes `@sveltejs/adapter-node`'s build output exports a `server` (a `polka` instance whose
 `.server` is the underlying `http.Server`). Other Node adapters are not supported.
 
-### HMR port collision
+### Sharing the dev server's port with HMR
 
 `configureServer`/`configurePreviewServer` attach the upgrade hook to the **same** `httpServer` that Vite's
-dev/preview server uses. Every `'upgrade'` request on that port reaches `WebSockets.upgrade`, which closes
-the socket immediately for any path that isn't a registered route (see `upgrade()` above).
-
-Vite's own HMR client opens a WebSocket on the dev server's port by default, and that connection is not a
-registered route — so it gets closed the same way, the browser's HMR client keeps reconnecting, and the
-page reloads in a loop.
-
-Fix: give HMR's WebSocket its own port with `server.ws.port` in `vite.config.ts` (see the [README](./README.md#1-register-the-vite-plugin-required)).
-That moves Vite's HMR socket off the port this plugin manages, so it's never seen by `WebSockets.upgrade`.
-(Vite 8 moved this option from `server.hmr.port` to `server.ws.port`; `hmr.port` is now deprecated.)
+dev/preview server uses. The hook only passes requests for registered routes to `WebSockets.upgrade` (see
+[`handles(req)`](#handlesreq)); anything else, such as Vite's HMR socket or Vitest's browser runner, is left
+to its own listener. A separate `server.ws.port` is therefore not needed.
 
 ---
 

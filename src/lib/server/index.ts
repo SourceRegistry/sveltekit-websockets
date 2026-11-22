@@ -1,6 +1,7 @@
 import {WebSocketServer, WebSocket} from 'ws';
 import type {Duplex} from 'node:stream';
 import type {IncomingMessage} from 'node:http';
+import {STATUS_CODES} from 'node:http';
 import {randomBytes, randomUUID} from "node:crypto";
 import {EventEmitter} from "node:events";
 
@@ -212,20 +213,31 @@ interface PendingKey {
     expiresAt: number;
 }
 
-// Better error types
-export enum WebSocketError {
-    TOO_MANY_CONNECTIONS = 1013,
-    INVALID_KEY = 1008,
-    MISSING_PARAM = 1008,
-    AUTH_FAILED = 1008,
-    TIMEOUT = 1001,
-    RATE_LIMITED = 1013
-}
+/**
+ * Close codes used when the server closes a connection. Several names share a code (e.g. `1008` is the
+ * generic "policy violation" code), so this is a plain object rather than an enum: an enum's reverse
+ * lookup (`WebSocketError[1008]`) could only ever return one of the names.
+ */
+export const WebSocketError = {
+    TOO_MANY_CONNECTIONS: 1013,
+    INVALID_KEY: 1008,
+    MISSING_PARAM: 1008,
+    AUTH_FAILED: 1008,
+    TIMEOUT: 1001,
+    RATE_LIMITED: 1013
+} as const;
+
+export type WebSocketError = typeof WebSocketError[keyof typeof WebSocketError];
 
 export type UpgradeHandler = (input: {
     req: IncomingMessage,
     head: Buffer,
     accept: () => MaybePromise<unknown>,
+    /**
+     * Rejects the upgrade with a plain HTTP response.
+     * @param reason sent as the response body
+     * @param code HTTP status code, `400`–`599` (default `400`); anything else is sent as `400`
+     */
     decline: (reason: string, code?: number) => unknown
 }) => MaybePromise<any>;
 
@@ -237,6 +249,8 @@ export type GenericWebSocketEndpointConfig = {
 
 export interface GenericWebSocketEndpointController {
     destroy(): void;
+
+    gracefulShutdown?(timeout?: number): Promise<void>;
 
     get config(): WebSocketEndpointConfig
 }
@@ -257,6 +271,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
     private pendingKeys = new Map<string, PendingKey>();
     private rateLimitMap = new Map<string, { count: number; resetTime: number }>();
     private cleanupTimer?: NodeJS.Timeout;
+    private destroyed = false;
     private readonly _config: WebSocketEndpointConfig;
 
     get authHandler() {
@@ -286,6 +301,20 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
             if (now > limit.resetTime) {
                 this.rateLimitMap.delete(clientId);
             }
+        }
+    }
+
+    /**
+     * Emits `error` when someone is listening. An EventEmitter `error` event with no listener throws, which
+     * would turn any client-side socket error into an uncaught exception and crash the server.
+     * @internal
+     */
+    reportError(error: unknown, ws?: ReferencedWebSocket): void {
+        const err = error instanceof Error ? error : new Error(String(error));
+        if (this.listenerCount('error') > 0) {
+            this.emit('error', err, ws);
+        } else {
+            console.error(`[sveltekit-websockets] ${this.path}:`, err);
         }
     }
 
@@ -352,18 +381,22 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
         return false;
     }
 
-    async add(ws: ReferencedWebSocket, req: IncomingMessage) {
+    /**
+     * Validates and registers an upgraded socket. Resolves `true` when the socket was accepted, `false`
+     * when it was rejected (and closed).
+     */
+    async add(ws: ReferencedWebSocket, req: IncomingMessage): Promise<boolean> {
         try {
             // Rate limiting check
             if (!this.checkRateLimit(req)) {
                 ws.close(WebSocketError.RATE_LIMITED, 'Rate limit exceeded');
-                return;
+                return false;
             }
 
             // Connection limit check
             if (this.config?.limit && this.sockets.size >= this.config.limit) {
                 ws.close(WebSocketError.TOO_MANY_CONNECTIONS, 'Too many connections');
-                return;
+                return false;
             }
 
             const params = parseUrl(req)?.searchParams;
@@ -373,7 +406,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
                 const providedKey = params.get('key');
                 if (!this.validateConnectionKey(providedKey || '')) {
                     ws.close(WebSocketError.INVALID_KEY, 'Invalid or expired connection key');
-                    return;
+                    return false;
                 }
             }
 
@@ -382,7 +415,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
                 for (const param of this.config.requiredParams) {
                     if (!params.has(param)) {
                         ws.close(WebSocketError.MISSING_PARAM, `Missing required parameter: ${param}`);
-                        return;
+                        return false;
                     }
                 }
             }
@@ -390,7 +423,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
             // Authentication
             if (!await this.authHandler(req)) {
                 ws.close(WebSocketError.AUTH_FAILED, 'Authentication failed');
-                return;
+                return false;
             }
 
             // Store parameters and add socket
@@ -413,7 +446,7 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
             });
 
             ws.on('error', (error: Error) => {
-                this.emit('error', error, ws);
+                this.reportError(error, ws);
             });
 
             // Activity tracking
@@ -425,9 +458,11 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
             }
 
             this.emit('connect', ws);
+            return true;
         } catch (error) {
-            this.emit('error', error as Error, ws);
+            this.reportError(error, ws);
             ws.close(1011, 'Internal server error');
+            return false;
         }
     }
 
@@ -626,6 +661,9 @@ export class WebSocketEndpointController extends EventEmitter<WebSocketEndpointE
     }
 
     destroy() {
+        if (this.destroyed) return;
+        this.destroyed = true;
+
         if (this.cleanupTimer) {
             clearInterval(this.cleanupTimer);
             this.cleanupTimer = undefined;
@@ -699,87 +737,246 @@ export class WebSocketRawEndpointController implements GenericWebSocketEndpointC
     }
 }
 
+export type UseConnectionHandler = (ws: ReferencedWebSocket, controller: WebSocketEndpointController) => unknown;
+
+/**
+ * Backs `use()`. A route can serve many per-request connections at once, so every `use()` call gets its own
+ * single-connection {@link WebSocketEndpointController}, registered here under its one-time connection key.
+ * An upgrade is routed to the controller its `?key=` belongs to. A controller is released when its key
+ * expires unused, when its handshake is rejected, or when its connection closes.
+ */
+export class WebSocketRequestEndpointController implements GenericWebSocketEndpointController {
+    private readonly pending = new Map<string, { controller: WebSocketEndpointController, expiry: NodeJS.Timeout }>();
+    private readonly active = new Set<WebSocketEndpointController>();
+
+    constructor(public readonly path: string, private readonly _config: GenericWebSocketEndpointConfig) {
+    }
+
+    get config() {
+        return this._config;
+    }
+
+    /** Number of unclaimed keys plus live connections. */
+    get size() {
+        return this.pending.size + this.active.size;
+    }
+
+    /**
+     * Creates a single-connection controller and returns its connection URL.
+     */
+    create(connectionHandler: UseConnectionHandler, config?: Omit<WebSocketEndpointConfig, 'disposer' | 'limit' | 'path'>): string {
+        const controller: WebSocketEndpointController = new WebSocketEndpointController(this.path, {
+            ...config,
+            limit: 1,
+            // A key is what routes the upgrade to this controller, so `use()` endpoints always need one.
+            useConnectionKeys: true,
+            disposer: () => this.release(key, controller),
+        });
+        const key = controller.generatePendingConnectionKey();
+
+        const expiry = setTimeout(() => controller.destroy(), controller.config.pendingKeyExpiration || 2 * 60 * 1000);
+        expiry.unref?.();
+        this.pending.set(key, {controller, expiry});
+
+        controller.once('connect', (socket) => {
+            socket.once('close', () => controller.destroy());
+            // A synchronous throw is caught by `controller.add`, which closes the socket with 1011.
+            const result = connectionHandler(socket, controller);
+            if (result instanceof Promise) {
+                result.catch((error) => controller.reportError(error, socket));
+            }
+        });
+
+        return `${this.path}?key=${key}`;
+    }
+
+    /**
+     * Takes the controller a connection key belongs to. A key can be claimed once; later upgrades with the same
+     * key get nothing.
+     */
+    claim(key: string | null): WebSocketEndpointController | undefined {
+        if (!key) return undefined;
+        const entry = this.pending.get(key);
+        if (!entry) return undefined;
+        this.pending.delete(key);
+        clearTimeout(entry.expiry);
+        this.active.add(entry.controller);
+        return entry.controller;
+    }
+
+    private release(key: string, controller: WebSocketEndpointController) {
+        const entry = this.pending.get(key);
+        if (entry?.controller === controller) {
+            clearTimeout(entry.expiry);
+            this.pending.delete(key);
+        }
+        this.active.delete(controller);
+        if (this.size === 0) {
+            this._config.disposer?.();
+        }
+    }
+
+    private controllers() {
+        return [...Array.from(this.pending.values(), (entry) => entry.controller), ...this.active];
+    }
+
+    async gracefulShutdown(timeout?: number): Promise<void> {
+        await Promise.all(Array.from(this.active, (controller) => controller.gracefulShutdown(timeout)));
+    }
+
+    destroy() {
+        for (const controller of this.controllers()) {
+            controller.destroy();
+        }
+        this.pending.clear();
+        this.active.clear();
+        this._config.disposer?.();
+    }
+}
+
 function parseUrl(req: IncomingMessage): URL {
     return new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+}
+
+function routePath(route: string | RequestEventLike | URL): string {
+    if (typeof route === 'string') return route;
+    if (route instanceof URL) return route.pathname;
+    return route.url.pathname;
+}
+
+/**
+ * Rejects an upgrade request with a plain HTTP response. `code` must be an HTTP error status (`400`–`599`);
+ * anything else (such as a WebSocket close code) is sent as `400`.
+ */
+function rejectUpgrade(socket: Duplex, code: number, reason: string) {
+    const status = Number.isInteger(code) && code >= 400 && code <= 599 ? code : 400;
+    // The reason becomes the response body; strip line breaks so it can't inject headers.
+    const body = String(reason ?? '').replace(/[\r\n]+/g, ' ');
+    if (!socket.writable) {
+        socket.destroy();
+        return;
+    }
+    socket.once('finish', () => socket.destroy());
+    socket.end(
+        `HTTP/1.1 ${status} ${STATUS_CODES[status] ?? 'Error'}\r\n` +
+        'Connection: close\r\n' +
+        'Content-Type: text/plain; charset=utf-8\r\n' +
+        `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+        '\r\n' +
+        body
+    );
 }
 
 const allowed_routes = new Map<string, GenericWebSocketEndpointController>();
 const server = new WebSocketServer({noServer: true, WebSocket: ReferencedWebSocket});
 
+/** Removes a route only if it still belongs to `controller` (a newer controller may have taken the path). */
+const unregister = (path: string, controller: GenericWebSocketEndpointController) => {
+    if (allowed_routes.get(path) === controller) {
+        allowed_routes.delete(path);
+    }
+};
+
+const alreadyRegistered = (path: string, by: GenericWebSocketEndpointController) => {
+    const kind = by instanceof WebSocketRequestEndpointController ? 'use()'
+        : by instanceof WebSocketRawEndpointController ? 'raw()'
+            : 'continuous()';
+    return new Error(`sveltekit-websockets: "${path}" is already registered by ${kind}`);
+};
+
 export const WebSockets = {
+    /**
+     * Registers (or returns the existing) long-lived endpoint for a route.
+     * @throws when the route is already registered by `use()` or `raw()`
+     */
     continuous(route: string | RequestEventLike | URL, config?: Omit<WebSocketEndpointConfig, 'disposer' | "path">) {
-        let path: string;
-        if (typeof route === 'string') {
-            path = route;
-        } else if (route instanceof URL) {
-            path = route.pathname;
-        } else {
-            path = route.url.pathname
+        const path = routePath(route);
+        const existing = allowed_routes.get(path);
+        if (existing) {
+            if (existing instanceof WebSocketEndpointController) return existing;
+            throw alreadyRegistered(path, existing);
         }
-        if (!allowed_routes.has(path)) {
-            allowed_routes.set(path, new WebSocketEndpointController(path, {
-                ...config,
-                disposer: () => allowed_routes.delete(path),
-            }));
-        }
-        return (allowed_routes.get(path) as WebSocketEndpointController)!;
+        const controller: WebSocketEndpointController = new WebSocketEndpointController(path, {
+            ...config,
+            disposer: () => unregister(path, controller),
+        });
+        allowed_routes.set(path, controller);
+        return controller;
     },
 
-    use(route: string | RequestEventLike | URL, connectionHandler: (ws: ReferencedWebSocket, controller: WebSocketEndpointController) => unknown, config?: Omit<WebSocketEndpointConfig, 'disposer' | 'limit' | 'path'>) {
-        let path: string;
-        if (typeof route === 'string') path = route;
-        else if (route instanceof URL) path = route.pathname;
-        else path = route.url.pathname
-
-        if (!allowed_routes.has(path)) {
-            const controller = new WebSocketEndpointController(path, {
-                ...config,
-                limit: 1,
-                disposer: () => allowed_routes.delete(path),
+    /**
+     * Creates a single-use endpoint for one connection and returns its URL (with a one-time `?key=`).
+     * Every call gets its own controller and handler, so concurrent requests to the same route are isolated.
+     * `useConnectionKeys: false` is ignored: the key is what routes the connection to this call's handler.
+     * @throws when the route is already registered by `continuous()` or `raw()`
+     */
+    use(route: string | RequestEventLike | URL, connectionHandler: UseConnectionHandler, config?: Omit<WebSocketEndpointConfig, 'disposer' | 'limit' | 'path'>): string {
+        const path = routePath(route);
+        let endpoint = allowed_routes.get(path);
+        if (!endpoint) {
+            const requests: WebSocketRequestEndpointController = new WebSocketRequestEndpointController(path, {
+                disposer: () => unregister(path, requests),
             });
-            allowed_routes.set(path, controller);
-            controller.once('connect', (socket) => {
-                socket.once('close', () => controller.destroy())
-                connectionHandler(socket, controller)
-            })
+            allowed_routes.set(path, requests);
+            endpoint = requests;
         }
-        return (allowed_routes.get(path) as WebSocketEndpointController)!.new;
+        if (!(endpoint instanceof WebSocketRequestEndpointController)) {
+            throw alreadyRegistered(path, endpoint);
+        }
+        return endpoint.create(connectionHandler, config);
     },
 
     raw(route: string | RequestEventLike | URL, handle: UpgradeHandle) {
-        let path: string;
-        if (typeof route === 'string') path = route;
-        else if (route instanceof URL) path = route.pathname;
-        else path = route.url.pathname
+        const path = routePath(route);
         if (!allowed_routes.has(path)) {
-            const controller = new WebSocketRawEndpointController(path, {
+            const controller: WebSocketRawEndpointController = new WebSocketRawEndpointController(path, {
                 handle,
-                disposer: () => allowed_routes.delete(path),
+                disposer: () => unregister(path, controller),
             });
             allowed_routes.set(path, controller)
         }
     },
 
-    clear() {
+    /**
+     * Unregisters every route and closes every connection with `1001`, force-terminating sockets still open
+     * after `timeout` ms. The generated production entry calls this when the HTTP server starts closing
+     * (SIGINT/SIGTERM on adapter-node); call it yourself from a custom server's shutdown.
+     */
+    async shutdown(timeout: number = 5000): Promise<void> {
         const controllers = Array.from(allowed_routes.values());
         allowed_routes.clear();
-        // Graceful shutdown for all controllers
-        Promise.all(controllers.map(async (controller) => {
-            if (controller instanceof WebSocketEndpointController) {
-                await controller.gracefulShutdown();
+        await Promise.all(controllers.map(async (controller) => {
+            try {
+                await controller.gracefulShutdown?.(timeout);
+            } finally {
+                controller.destroy();
             }
-            controller.destroy();
-        })).finally(() => console.debug("Closed all controllers"))
+        }));
+    },
+
+    /**
+     * Same as {@link WebSockets.shutdown} with the default timeout.
+     */
+    clear(): Promise<void> {
+        return WebSockets.shutdown();
+    },
+
+    /**
+     * Whether a route is registered for this upgrade request. Lets a server that has other `'upgrade'`
+     * listeners (Vite's HMR, Vitest's browser runner) leave requests it doesn't own alone.
+     */
+    handles(req: IncomingMessage): boolean {
+        return allowed_routes.has(parseUrl(req).pathname);
     },
 
     async upgrade(req: IncomingMessage, socket: Duplex, head: Buffer) {
         try {
-            const path = parseUrl(req).pathname;
-            if (!allowed_routes.has(path)) {
+            const url = parseUrl(req);
+            const controller = allowed_routes.get(url.pathname);
+            if (!controller) {
                 socket.end();
                 return;
             }
-            const controller = allowed_routes.get(path)!;
             if (controller instanceof WebSocketEndpointController) {
                 if (!controller.beforeUpgrade) {
                     controller.beforeUpgrade = ({accept}) => accept();
@@ -787,9 +984,17 @@ export const WebSockets = {
                 await controller.beforeUpgrade({
                     req, head,
                     accept: () => server.handleUpgrade(req, socket, head, (ws, req) => controller.add(ws, req)),
-                    decline: (reason, code = 1002) => {
-                        socket.write(`HTTP/1.1 ${code} ${reason}\r\n\r\n`);
-                        socket.destroy();
+                    decline: (reason, code = 400) => rejectUpgrade(socket, code, reason)
+                });
+            } else if (controller instanceof WebSocketRequestEndpointController) {
+                const endpoint = controller.claim(url.searchParams.get('key'));
+                server.handleUpgrade(req, socket, head, async (ws, req) => {
+                    if (!endpoint) {
+                        ws.close(WebSocketError.INVALID_KEY, 'Invalid or expired connection key');
+                        return;
+                    }
+                    if (!await endpoint.add(ws, req)) {
+                        endpoint.destroy();
                     }
                 });
             } else if (controller instanceof WebSocketRawEndpointController) {
@@ -808,3 +1013,4 @@ if (!globalThis.websockets) {
 export const websockets = globalThis.websockets;
 
 export default websockets;
+

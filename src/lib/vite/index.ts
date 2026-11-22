@@ -42,6 +42,17 @@ if (typeof httpServer?.on !== 'function') {
 }
 httpServer.on('upgrade', (req, socket, head) => WebSockets.upgrade(req, socket, head));
 
+// adapter-node shuts down by calling httpServer.close() (SIGINT, SIGTERM, socket-activation idle) and only
+// emits 'sveltekit:shutdown' once close() completes. close() waits for every connection, upgraded WebSockets
+// included, so close those as soon as shutdown starts instead of hanging until SHUTDOWN_TIMEOUT.
+if (typeof httpServer.close === 'function' && typeof WebSockets.shutdown === 'function') {
+    const close = httpServer.close;
+    httpServer.close = function (...args) {
+        WebSockets.shutdown().catch((error) => console.error('${_package.name}: WebSocket shutdown failed', error));
+        return close.apply(this, args);
+    };
+}
+
 console.log('> SvelteKit WebSockets adapter');
 
 export * from "./_index.js";
@@ -92,13 +103,19 @@ export const websockets = (opts = {packageOutputDir: 'build'}) => {
         }
     };
 
+    // The dev and preview servers have other 'upgrade' listeners (Vite's HMR, Vitest's browser runner), so
+    // only take the requests for registered routes and leave the rest to them.
+    const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+        if (WebSockets.handles(req)) WebSockets.upgrade(req, socket, head);
+    };
+
     return {
         name: 'sveltekit-websocket-server',
         configurePreviewServer: (server: {httpServer?: {on(event: 'upgrade', listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void): void} | null}) => {
-            server.httpServer?.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => WebSockets.upgrade(req, socket, head));
+            server.httpServer?.on('upgrade', onUpgrade);
         },
         configureServer: (server: {httpServer?: {on(event: 'upgrade', listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void): void} | null}) => {
-            server.httpServer?.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => WebSockets.upgrade(req, socket, head));
+            server.httpServer?.on('upgrade', onUpgrade);
         },
         // SvelteKit 2 runs the adapter while closing the bundle.
         closeBundle: {
