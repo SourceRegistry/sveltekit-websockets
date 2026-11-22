@@ -738,3 +738,9 @@ describe('checks before the handshake', () => {
         }
     });
 });
+
+describe('unregistered paths', () => {
+    it('answers with 404', async () => {
+        expect(await rejection('/not-registered')).toEqual({status: 404, body: 'No WebSocket endpoint at this path'});
+    });
+});

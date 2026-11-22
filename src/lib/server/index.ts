@@ -1269,7 +1269,7 @@ export const WebSockets = {
             const url = parseUrl(req);
             const controller = allowed_routes.get(url.pathname);
             if (!controller) {
-                socket.end();
+                rejectUpgrade(socket, 404, 'No WebSocket endpoint at this path');
                 return;
             }
             if (controller instanceof WebSocketEndpointController) {
