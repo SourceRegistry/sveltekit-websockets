@@ -49,8 +49,12 @@ const last = () => FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
 
 const deferred = <T>() => {
     let resolve!: (value: T) => void;
-    const promise = new Promise<T>((r) => resolve = r);
-    return {promise, resolve};
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    return {promise, resolve, reject};
 };
 
 const actionResponse = (url: string) => new Response(JSON.stringify({
@@ -310,12 +314,16 @@ describe('WebSocket component reconnect', () => {
 
     it('retries a failed action request', async () => {
         const onerror = vi.fn();
+        // Fail the first request only once fake timers are installed; otherwise the retry can be scheduled on
+        // a real timer with a random delay.
+        const first = deferred<Response>();
         const fetch = vi.fn()
-            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockImplementationOnce(() => first.promise)
             .mockImplementation(async () => actionResponse('ws://example.test/a'));
         vi.stubGlobal('fetch', fetch);
 
         await mountWithFakeTimers({action: '?/ws', reconnect: true, onerror});
+        first.reject(new TypeError('Failed to fetch'));
         await vi.waitFor(() => expect(onerror).toHaveBeenCalledTimes(1));
 
         await vi.advanceTimersByTimeAsync(1000);
