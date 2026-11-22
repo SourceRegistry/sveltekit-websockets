@@ -23,9 +23,10 @@ updates:
       # svelte-check supports TypeScript up to 6.
       - dependency-name: typescript
         versions: ['>=7.0.0']
-      # Must parse what SvelteKit serializes; follow the major SvelteKit itself depends on.
+      # Must parse what SvelteKit serializes. devalue 6 writes and reads the same format as the devalue 5
+      # SvelteKit 3 uses (checked across all supported types), so allow 6.x; review the next major by hand.
       - dependency-name: devalue
-        versions: ['>=6.0.0']
+        versions: ['>=7.0.0']
 
   - package-ecosystem: github-actions
     directory: /
